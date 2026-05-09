@@ -1,0 +1,64 @@
+From: uc386 / Aaron Wohl <aawohl@gmail.com>
+Subject: [PATCH] sdlmain: skip CheckQuit() y/n confirmation in -silent mode
+
+Symptom: under `dosbox-x -silent` (no GUI), an `[autoexec]` section
+that runs a program then `exit` hangs DOSBox-X until the host
+SIGKILLs it. The DOSBox-X stderr fills with thousands of repeats
+of the "Are you sure to quit anyway now? y/n: " prompt.
+
+Root cause: when `[autoexec]` runs `exit` while a program's name
+is still in `RunningProgram`, `CheckQuit()` calls
+`systemmessagebox(... "yesno" ...)`. Under `-silent` +
+`SDL_VIDEODRIVER=dummy`, this falls through to
+`tinyfd_messageBox`'s console path, which is a `do { printf("y/n: ");
+lChar = _getch(); } while (lChar != 'y' && lChar != 'n');` loop.
+With no usable stdin, `_getch()` never returns 'y' or 'n', so the
+loop never terminates. Eventually the host kills DOSBox-X with
+SIGKILL.
+
+A consequential symptom of the SIGKILL is that any
+fwrite-buffered stdio bytes in `LocalFile`s open at the time —
+e.g., a redirected stdout from `program > out.txt` — are lost
+along with the rest of host process state. Programs that
+explicitly `INT 21h AH=0x68` (commit) after writes are unaffected
+since those bytes were already on disk; programs that don't (the
+typical C `write(2)` wrapper pattern) lose their last unflushed
+output. This is itself "expected" SIGKILL behavior — the actual
+bug is the y/n loop preventing clean shutdown.
+
+Fix: skip the confirmation in `-silent` mode and just allow the
+quit. The clean shutdown path then closes all file handles,
+which `fclose`s any redirected output files, which flushes their
+stdio buffers — so even programs that didn't AH=68 see their
+output preserved.
+
+Verified end-to-end: with this patch applied, our reproducer
+(uc386-MicroPython MP.EXE redirected to MPOUT.TXT via [autoexec]
+ending in `exit`) now produces the full 657-byte expected
+output under `dosbox-x -silent`, matching classic DOSBox 0.74-3
+and QEMU+FreeDOS. Without the patch, MPOUT.TXT is truncated to
+481 bytes (the bytes that happened to be flushed by the
+program's bridge stub via AH=68 calls before its main work).
+
+CI run that verifies the fix:
+https://github.com/avwohl/uc386/actions/runs/25503143057
+
+---
+ src/gui/sdlmain.cpp | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/src/gui/sdlmain.cpp b/src/gui/sdlmain.cpp
+--- a/src/gui/sdlmain.cpp
++++ b/src/gui/sdlmain.cpp
+@@ -1340,6 +1340,12 @@ static int reflectmenu_state = 0;
+ bool CheckQuit(void) {
+ #if !defined(HX_DOS)
++    /* In -silent mode there is no UI to answer the y/n
++     * confirmation; tinyfd_messageBox falls back to printf+_getch
++     * which loops forever waiting for stdin. Auto-confirm so
++     * DOSBox-X exits cleanly (closing all open files, flushing
++     * stdio buffers held by LocalFile fwrite). */
++    if (control && control->opt_silent) return true;
+     Section_prop *section = static_cast<Section_prop *>(control->GetSection("dosbox"));
+     std::string warn = section->Get_string("quit warning");
+     bool quit = section->Get_bool("allow quit after warning");

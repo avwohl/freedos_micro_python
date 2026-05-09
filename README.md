@@ -1,0 +1,103 @@
+# freedos_micro_python
+
+[MicroPython](https://github.com/micropython/micropython) port for
+**FreeDOS / i386**, built end-to-end through the
+[uc386](https://pypi.org/project/uc386/) C23 compiler. Produces a
+runnable flat-binary or PMODE/W `.exe` with a fully-functional
+Python REPL — arithmetic, control flow, classes, list comprehensions,
+exception handling, and ~25 named builtins all work.
+
+```
+MicroPython uc386-triage on 2026-05-01; uc386-dos with i386
+Type "help()" for more information.
+>>> def fib(n):
+...     if n < 2: return n
+...     return fib(n-1) + fib(n-2)
+...
+>>> print([fib(i) for i in range(10)])
+[0, 1, 1, 2, 3, 5, 8, 13, 21, 34]
+```
+
+## Status
+
+- ~444 KB binary at the EXTRA_FEATURES + axtls TLS configuration
+- ~70 smoke tests pin REPL banner, builtins, comprehensions, exceptions,
+  module imports (`os`, `time`, `re`, `json`, `hashlib`, `ssl`, ...),
+  and the long-int / float code paths
+- See [`NOTES.md`](NOTES.md) for the full per-slice development log
+
+## Install
+
+```
+pip install freedos_micro_python
+```
+
+This pulls in `uc386` (the compiler) automatically. You also need:
+
+- a Unix-y shell to drive the `build_port.sh` script (macOS / Linux)
+- `git` (for fetching the upstream MicroPython sources)
+- `make` is **not** required
+
+## Quick start
+
+```bash
+mkdir mp-build && cd mp-build
+freedos-micropython fetch        # clones upstream MicroPython into ./upstream
+freedos-micropython build        # per-TU triage build (generates qstrdefs)
+freedos-micropython port         # multi-TU build → ./build/micropython.bin
+```
+
+Wall-clock for the `port` step is ~14 minutes on a recent Mac. The
+output is `./build/micropython.bin`, a flat i386 DOS binary runnable
+under uc386's emulator:
+
+```python
+from uc386.dos_emu import run
+res = run("build/micropython.bin", timeout_seconds=10.0,
+          instruction_limit=2_000_000_000)
+print(res.stdout)   # → "MicroPython uc386-triage on ...\n..."
+```
+
+To produce a real DOS `.exe` (PMODE/W bound, ~12 KB stub overhead):
+use uc386's `addons/harness/exe.py`.
+
+## Testing
+
+After a successful `port` build:
+
+```bash
+pytest --pyargs freedos_micro_python    # parametric: tests live in tests/
+# or, against a checkout:
+pytest tests/
+```
+
+The smoke tests skip cleanly if `build/micropython.bin` doesn't exist.
+
+## Layout
+
+- `src/freedos_micro_python/scripts/` — the three shell scripts
+  (`fetch.sh`, `build.sh`, `build_port.sh`); invoked via the CLI
+  wrapper, which sets `UC386_LIB_INCLUDE` from the installed `uc386`
+- `src/freedos_micro_python/port/` — the FreeDOS port files
+  (`mpconfigport.h`, `*_uc386dos.c`, lwIP + axtls glue)
+- `src/freedos_micro_python/gen_qstrdefs.py` — qstr table generator
+  (mirrors upstream's `tools/makeqstrdata.py`)
+- `src/freedos_micro_python/cli.py` — the `freedos-micropython` CLI
+- `tests/` — pytest smoke tests + qstr unit tests
+- `rigs/dosbox-x-rig/` — DOSBox-X regression rig (network packet driver)
+- `rigs/tls-rig/` — axtls TLS regression rig
+
+## License
+
+[MIT](LICENSE), matching upstream MicroPython. The integration glue
+(scripts, port files, CLI, tests) is what's covered here; the
+upstream MicroPython sources fetched by `build_port.sh` retain their
+own MIT license.
+
+## Related projects
+
+- [uc386](https://github.com/avwohl/uc386) — the C23 compiler that
+  builds this port. Hosts the `dos_emu` test harness.
+- [uc_core](https://github.com/avwohl/uc_core) — shared C23 frontend
+  used by uc386 (and the Z80 sibling, uc80).
+- [MicroPython](https://github.com/micropython/micropython) — upstream.

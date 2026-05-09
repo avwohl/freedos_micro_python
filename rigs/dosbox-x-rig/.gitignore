@@ -1,0 +1,18 @@
+# Third-party binaries fetched on demand.
+NE2000.COM
+MP.EXE
+mp.exe
+
+# CI-generated baseline (built from addons/gnu/echo via exe.py).
+ECHOTEST.EXE
+
+# DOSBox-X session output.
+RIG.LOG
+MP_OUT.TXT
+*.tmp
+
+# QEMU+FreeDOS session output (run-qemu-freedos.sh).
+qemu-freedos.log
+
+# CI-generated test script.
+SCRIPT.PY
