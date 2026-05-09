@@ -63,8 +63,16 @@ fi
 # moduledefs.h, mpversion.h, root_pointers.h) that py/*.c expects.
 # Run it first if those aren't here yet.
 if [ ! -f build/genhdr/qstrdefs.generated.h ]; then
-    echo "micropython: stub headers missing; running ./build.sh first." >&2
-    ./build.sh > /dev/null
+    # Look for build.sh next to ourselves first (CLI sets
+    # FREEDOS_MP_SCRIPTS_DIR; standalone caller likely has it as
+    # a sibling of build_port.sh).
+    BUILD_SH="${FREEDOS_MP_SCRIPTS_DIR:-$(dirname "$0")}/build.sh"
+    if [ ! -x "$BUILD_SH" ]; then
+        echo "micropython: cannot find build.sh; tried $BUILD_SH" >&2
+        exit 1
+    fi
+    echo "micropython: stub headers missing; running build.sh first." >&2
+    "$BUILD_SH" > /dev/null
 fi
 
 # Two ways this script gets its uc386 paths:

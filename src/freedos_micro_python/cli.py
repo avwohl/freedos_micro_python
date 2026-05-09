@@ -65,6 +65,14 @@ def _run_script(name: str, workdir: Path, extra_args: list[str]) -> int:
     env["UC386_LIB_INCLUDE"] = str(_uc386_lib_include())
     env["FREEDOS_MP_PORT_DIR"] = str(_port_dir())
     env["FREEDOS_MP_SCRIPTS_DIR"] = str(_scripts_dir())
+    env["FREEDOS_MP_GEN_QSTRDEFS"] = str(
+        _scripts_dir().parent / "gen_qstrdefs.py"
+    )
+    # Pin the python the scripts invoke for `python -m uc386.main` to
+    # the same interpreter that's running this CLI — it's the one with
+    # uc386 installed. Without this the scripts fall back to
+    # `command -v python3.12` and hit the system python without uc386.
+    env["PYTHON"] = sys.executable
     workdir.mkdir(parents=True, exist_ok=True)
     _ensure_port_symlink(workdir)
     return subprocess.run(

@@ -219,7 +219,7 @@ if [ ! -f build/genhdr/qstrdefs.generated.h ]; then
             grep -hoE "^[[:space:]]*X\([A-Z][A-Z0-9_]*\)" \
                     upstream/py/moderrno.c \
                 | sed -E 's/^[[:space:]]*X\(([A-Z][A-Z0-9_]*)\)/MP_QSTR_\1/'
-        } | "$PYTHON" gen_qstrdefs.py --bytes-hash 2
+        } | "$PYTHON" "${FREEDOS_MP_GEN_QSTRDEFS:-$(dirname "$0")/../gen_qstrdefs.py}" --bytes-hash 2
     } > build/genhdr/qstrdefs.generated.h
 fi
 # Always regenerate moduledefs.h — it's small and the cache turned
