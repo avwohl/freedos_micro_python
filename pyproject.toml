@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "freedos_micro_python"
-version = "0.1.3"
+version = "0.1.4"
 description = "MicroPython port for FreeDOS / i386 — built end-to-end through the uc386 C23 compiler"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
 dependencies = [
-    "uc386>=0.1.2",
+    "uc386>=0.1.3",
 ]
 authors = [
     {name = "freedos_micro_python contributors"}
