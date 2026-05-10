@@ -2913,7 +2913,10 @@ def test_dosbox_x_rig_loads_ne2000(tmp_path: Path) -> None:
 
     if shutil.which("dosbox-x") is None:
         pytest.skip("dosbox-x not on PATH; install via `brew install dosbox-x`")
-    rig_dir = _HERE / "dosbox-x-rig"
+    # The dosbox-x rig lives at `rigs/dosbox-x-rig/` in this repo
+    # (since the split out of uc386). Test file is at `tests/test_smoke.py`,
+    # so go up one to the repo root, then down into rigs/.
+    rig_dir = Path(__file__).resolve().parent.parent / "rigs" / "dosbox-x-rig"
     if not rig_dir.is_dir():
         pytest.skip(f"rig directory missing: {rig_dir}")
     if not (rig_dir / "NE2000.COM").is_file():
