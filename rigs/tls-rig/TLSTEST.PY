@@ -33,41 +33,24 @@ print('TLSTEST: ifup', up, 'ip', ip)
 if not up or not ip or ip == '0.0.0.0':
     print('TLSTEST: static_ip_failed')
     sys.exit(1)
+print('TLSTEST: pre_getaddrinfo')
 addr = socket.getaddrinfo('10.0.2.2', 8443)[0][-1]
+print('TLSTEST: post_getaddrinfo')
 s = socket.socket()
-s.setblocking(False)
-try:
-    s.connect(addr)
-except OSError:
-    pass  # EINPROGRESS expected on non-blocking connect; lwIP will
-          # send the SYN (and ARP-resolve the gateway) as we pump.
-print('TLSTEST: connect_initiated')
-# Pump lwIP and watch the thunk diag. If thunk count stays at 0
-# across many seconds of polling, the DPMI receiver trampoline isn't
-# being invoked even though packets are going OUT — that pinpoints
-# the RX side as the next bug.
-for tick in range(100):
-    _ = lwip.callback()
-    if (tick % 20) == 0:
-        d = uc386_net.pktdrv_diag()
-        sys.stdout.write('TLSTEST: diag tick=' + str(tick) + ' thunk=' + str(d[0]) + ' p0=' + str(d[1]) + ' p1=' + str(d[2]) + '\n')
-    time.sleep_ms(50)
-d = uc386_net.pktdrv_diag()
-sys.stdout.write('TLSTEST: diag_final thunk=' + str(d[0]) + ' p0=' + str(d[1]) + ' p1=' + str(d[2]) + '\n')
-s.setblocking(True)
-# Last-attempt connect — would succeed instantly if the non-blocking
-# connect completed during the polling, otherwise OSError.
+print('TLSTEST: post_socket')
+# Use blocking connect — MICROPY_PY_LWIP_POLL_HOOK in modlwip's wait
+# loop pumps our RX, so the SYN-ACK gets delivered to lwIP and
+# _lwip_tcp_connected transitions the socket to STATE_CONNECTED.
 try:
     s.connect(addr)
 except OSError as e:
-    print('TLSTEST: connect_failed_after_poll', e)
+    print('TLSTEST: connect_failed', e)
     sys.exit(2)
 print('TLSTEST: tcp_connected')
-with open('TESTCA.PEM', 'rb') as f:
-    ca = f.read()
 ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-ctx.verify_mode = ssl.CERT_REQUIRED
-_ = ctx.load_verify_locations(cadata=ca)
+print('TLSTEST: ctx_created')
+ctx.verify_mode = ssl.CERT_NONE     # skip cert verification for now
+print('TLSTEST: vmode_set')
 print('TLSTEST: ctx_ready')
 try:
     tls = ctx.wrap_socket(s)

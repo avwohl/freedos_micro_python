@@ -116,12 +116,10 @@ AUTOEXEC=$(mktemp)
 {
     printf '@echo off\r\n'
     printf 'CTTY COM1\r\n'
-    printf 'echo === before NE2000 ===\r\n'
-    printf 'NE2000 0x60 9 0x300\r\n'
-    printf 'echo === after NE2000 ===\r\n'
-    # MP.EXE without `<` redirection: stdin = console = COM1 (via
-    # CTTY). The host feeds the paste-mode-wrapped script through
-    # QEMU's -serial stdio (see TLSTEST_WRAPPED below).
+    printf 'echo === native NE2000 (no Crynwr) ===\r\n'
+    # NOTE: NE2000.COM (Crynwr) is NOT loaded — MP.EXE drives the
+    # NIC directly via PM-native IO port code. This bypasses the
+    # broken DPMI 0x0303 trampoline path on PMODE/W.
     printf 'MP.EXE\r\n'
     printf 'echo === rig done ===\r\n'
 } > "$AUTOEXEC"
@@ -168,6 +166,8 @@ qemu-system-i386 \
     -cpu pentium \
     -netdev user,id=net0 \
     -device ne2k_isa,netdev=net0,iobase=0x300,irq=9 \
+    -object filter-dump,id=f0,netdev=net0,file=/tmp/qemu-tls.pcap \
+    -trace enable=ne2000_*,file=/tmp/ne2000-trace.log \
     -no-reboot \
     < "$TLSTEST_WRAPPED" > "$LOG" 2>&1 &
 QEMU_PID=$!

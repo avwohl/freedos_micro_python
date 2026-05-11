@@ -97,6 +97,41 @@ static mp_obj_t mod_uc386_net_eth_set_static(mp_obj_t ip_obj, mp_obj_t mask_obj,
 static MP_DEFINE_CONST_FUN_OBJ_3(
     mod_uc386_net_eth_set_static_obj, mod_uc386_net_eth_set_static);
 
+extern unsigned char pktdrv_int_invoke(unsigned int, unsigned int *);
+static mp_obj_t mod_uc386_net_dos_alloc_test(void) {
+    extern int write(int fd, const void *buf, unsigned int n);
+    write(1, "[bisect:alloc-pre]", 18);
+    unsigned int regs[8] = {0};
+    regs[0] = 0x4800; regs[1] = 1;
+    pktdrv_int_invoke(0x21, regs);
+    write(1, "[bisect:alloc-post]", 19);
+    return MP_OBJ_NEW_SMALL_INT(0);
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(
+    mod_uc386_net_dos_alloc_test_obj, mod_uc386_net_dos_alloc_test);
+
+// Same as int60_then_alloc but with a HUGE local stack frame.
+// If this hangs at INT 0x21 but the small-frame version works,
+// stack size or alignment is the trigger.
+static mp_obj_t mod_uc386_net_int60_then_alloc(void) {
+    extern int write(int fd, const void *buf, unsigned int n);
+    char big_local[400];           // bloat frame
+    big_local[0] = 0;              // touch it so compiler keeps it
+    write(1, "[bi:60pre]", 10);
+    unsigned int r1[8] = {0};
+    r1[0] = 0x0100; r1[1] = 0xFFFF;
+    pktdrv_int_invoke(0x60, r1);
+    write(1, "[bi:60post]", 11);
+    write(1, "[bi:21pre]", 10);
+    unsigned int r2[8] = {0};
+    r2[0] = 0x4800; r2[1] = 1;
+    pktdrv_int_invoke(0x21, r2);
+    write(1, "[bi:21post]", 11);
+    return MP_OBJ_NEW_SMALL_INT(big_local[0]);   // use it
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(
+    mod_uc386_net_int60_then_alloc_obj, mod_uc386_net_int60_then_alloc);
+
 static mp_obj_t mod_uc386_net_pktdrv_diag(void) {
     mp_obj_t items[6];
     items[0] = MP_OBJ_NEW_SMALL_INT(pktdrv_thunk_invocations);
@@ -116,6 +151,8 @@ static const mp_rom_map_elem_t mp_module_uc386_net_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_eth_status), MP_ROM_PTR(&mod_uc386_net_eth_status_obj) },
     { MP_ROM_QSTR(MP_QSTR_eth_set_static), MP_ROM_PTR(&mod_uc386_net_eth_set_static_obj) },
     { MP_ROM_QSTR(MP_QSTR_pktdrv_diag), MP_ROM_PTR(&mod_uc386_net_pktdrv_diag_obj) },
+    { MP_ROM_QSTR(MP_QSTR_dos_alloc_test), MP_ROM_PTR(&mod_uc386_net_dos_alloc_test_obj) },
+    { MP_ROM_QSTR(MP_QSTR_int60_then_alloc), MP_ROM_PTR(&mod_uc386_net_int60_then_alloc_obj) },
 };
 static MP_DEFINE_CONST_DICT(
     mp_module_uc386_net_globals, mp_module_uc386_net_globals_table);

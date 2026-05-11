@@ -97,6 +97,215 @@ volatile unsigned int pktdrv_thunk_phase0_count = 0;
 volatile unsigned int pktdrv_thunk_phase1_count = 0;
 unsigned int pktdrv_last_handle = 0xDEADBEEF;
 
+// ============================================================
+// PM-native NE2000 driver. Bypasses Crynwr / DPMI 0x0303 entirely.
+// IO base is hardcoded to 0x300 (QEMU's ne2k_isa default).
+// We talk directly to the NIC registers via PM IO instructions
+// (PMODE/W grants PM clients full IO permission by default).
+// ============================================================
+extern void ne2k_outb(unsigned int port, unsigned int val);
+extern unsigned int ne2k_inb(unsigned int port);
+extern void ne2k_outsw(unsigned int port, const void *src, unsigned int wcount);
+extern void ne2k_insw(unsigned int port, void *dst, unsigned int wcount);
+
+#define NE2K_BASE   0x300
+#define NE2K_DATA   (NE2K_BASE + 0x10)
+#define NE2K_RESET  (NE2K_BASE + 0x1F)
+
+// NE2000 register offsets (page 0)
+#define NE_CR    0x00   // Command
+#define NE_PSTART 0x01
+#define NE_PSTOP  0x02
+#define NE_BNRY   0x03
+#define NE_TPSR   0x04
+#define NE_TBCR0  0x05
+#define NE_TBCR1  0x06
+#define NE_ISR    0x07
+#define NE_RSAR0  0x08
+#define NE_RSAR1  0x09
+#define NE_RBCR0  0x0A
+#define NE_RBCR1  0x0B
+#define NE_RCR    0x0C
+#define NE_TCR    0x0D
+#define NE_DCR    0x0E
+#define NE_IMR    0x0F
+// Page 1
+#define NE_PAR0   0x01
+#define NE_CURR   0x07
+
+// RX ring layout in NIC SRAM: TX page 0x40 (single TX buffer),
+// RX ring 0x46..0x80 (58 pages = 14848 bytes).
+#define TX_PAGE_START   0x40
+#define RX_PAGE_START   0x46
+#define RX_PAGE_STOP    0x80
+
+static unsigned char ne2k_mac[6];
+static int ne2k_initialized = 0;
+
+static void ne2k_dma_read(unsigned int nic_addr, void *dst, unsigned int byte_count) {
+    // Set up remote DMA read
+    ne2k_outb(NE2K_BASE + NE_ISR, 0x40);   // Pre-clear RDC
+    ne2k_outb(NE2K_BASE + NE_RBCR0, byte_count & 0xFF);
+    ne2k_outb(NE2K_BASE + NE_RBCR1, (byte_count >> 8) & 0xFF);
+    ne2k_outb(NE2K_BASE + NE_RSAR0, nic_addr & 0xFF);
+    ne2k_outb(NE2K_BASE + NE_RSAR1, (nic_addr >> 8) & 0xFF);
+    ne2k_outb(NE2K_BASE + NE_CR, 0x0A);    // Start, RD0=1 (remote DMA read)
+    ne2k_insw(NE2K_DATA, dst, (byte_count + 1) >> 1);
+    // Bounded wait for RDC (QEMU sets it immediately after insw, but
+    // a real NIC may take a few microseconds; cap to ~10ms-equivalent
+    // so a stuck NIC can't wedge the whole program).
+    unsigned int spin = 100000;
+    while (spin-- && !(ne2k_inb(NE2K_BASE + NE_ISR) & 0x40)) {}
+    ne2k_outb(NE2K_BASE + NE_ISR, 0x40);
+}
+
+static void ne2k_dma_write(unsigned int nic_addr, const void *src, unsigned int byte_count) {
+    ne2k_outb(NE2K_BASE + NE_ISR, 0x40);
+    ne2k_outb(NE2K_BASE + NE_RBCR0, byte_count & 0xFF);
+    ne2k_outb(NE2K_BASE + NE_RBCR1, (byte_count >> 8) & 0xFF);
+    ne2k_outb(NE2K_BASE + NE_RSAR0, nic_addr & 0xFF);
+    ne2k_outb(NE2K_BASE + NE_RSAR1, (nic_addr >> 8) & 0xFF);
+    ne2k_outb(NE2K_BASE + NE_CR, 0x12);    // Start, RD1=1 (remote DMA write)
+    ne2k_outsw(NE2K_DATA, src, (byte_count + 1) >> 1);
+    unsigned int spin = 100000;
+    while (spin-- && !(ne2k_inb(NE2K_BASE + NE_ISR) & 0x40)) {}
+    ne2k_outb(NE2K_BASE + NE_ISR, 0x40);
+}
+
+// Initialise the NIC. Returns 0 on success; fills mac with the read MAC.
+static int ne2k_init_direct(unsigned char mac[6]) {
+    extern int write(int fd, const void *buf, unsigned int n);
+    write(1, "[ne2k:init]", 11);
+    // Reset
+    unsigned int reset_val = ne2k_inb(NE2K_RESET);
+    ne2k_outb(NE2K_RESET, reset_val);
+    // Wait for RST bit
+    unsigned int spin = 100000;
+    while (spin-- && !(ne2k_inb(NE2K_BASE + NE_ISR) & 0x80)) {}
+    if (spin == 0) {
+        write(1, "[ne2k:reset-timeout]", 20);
+        return -1;
+    }
+    write(1, "[ne2k:reset-ok]", 15);
+
+    // Stop NIC, page 0
+    ne2k_outb(NE2K_BASE + NE_CR, 0x21);    // STP=1, RD2=1, PS=0
+    ne2k_outb(NE2K_BASE + NE_DCR, 0x49);   // word transfers, FIFO 8, normal
+    ne2k_outb(NE2K_BASE + NE_RBCR0, 0);
+    ne2k_outb(NE2K_BASE + NE_RBCR1, 0);
+    ne2k_outb(NE2K_BASE + NE_RCR, 0x20);   // Monitor mode (init)
+    ne2k_outb(NE2K_BASE + NE_TCR, 0x02);   // Loopback (init)
+    ne2k_outb(NE2K_BASE + NE_TPSR, TX_PAGE_START);
+    ne2k_outb(NE2K_BASE + NE_PSTART, RX_PAGE_START);
+    ne2k_outb(NE2K_BASE + NE_PSTOP, RX_PAGE_STOP);
+    ne2k_outb(NE2K_BASE + NE_BNRY, RX_PAGE_START);
+    ne2k_outb(NE2K_BASE + NE_ISR, 0xFF);   // Clear all interrupts
+    ne2k_outb(NE2K_BASE + NE_IMR, 0x00);   // No interrupts (we poll)
+
+    // Read MAC from PROM (32 bytes — PROM is 16 bytes, each byte
+    // appears twice in word reads). Word transfers give us 32 bytes.
+    unsigned char prom[32];
+    ne2k_dma_read(0x0000, prom, 32);
+    // Each word's low byte == high byte == one MAC byte. Take low.
+    for (int i = 0; i < 6; i++) {
+        mac[i] = prom[i * 2];
+        ne2k_mac[i] = mac[i];
+    }
+    write(1, "[ne2k:mac-read]", 15);
+
+    // Switch to page 1
+    ne2k_outb(NE2K_BASE + NE_CR, 0x61);    // STP=1, RD2=1, PS=1
+    // Set our MAC into PAR0..5
+    for (int i = 0; i < 6; i++) {
+        ne2k_outb(NE2K_BASE + NE_PAR0 + i, mac[i]);
+    }
+    // CURR = page after PSTART (so empty ring has CURR == BNRY+1)
+    ne2k_outb(NE2K_BASE + NE_CURR, RX_PAGE_START + 1);
+    // MAR0..7 = 0 (no multicast)
+    for (int i = 0; i < 8; i++) {
+        ne2k_outb(NE2K_BASE + 0x08 + i, 0);
+    }
+
+    // Back to page 0, start
+    ne2k_outb(NE2K_BASE + NE_CR, 0x22);    // STA=1, RD2=1, PS=0
+    ne2k_outb(NE2K_BASE + NE_TCR, 0x00);   // Normal TX
+    ne2k_outb(NE2K_BASE + NE_RCR, 0x04);   // Accept broadcast (and own-MAC unicast implicit)
+
+    ne2k_initialized = 1;
+    write(1, "[ne2k:ready]", 12);
+    return 0;
+}
+
+// Send a packet. Returns 0 on success.
+static int ne2k_send_direct(const unsigned char *buf, unsigned int len) {
+    if (!ne2k_initialized) return -1;
+    if (len < 60) len = 60;       // Pad to minimum ethernet frame
+    if (len > 1518) return -1;
+    // Wait for any in-progress TX to finish
+    while (ne2k_inb(NE2K_BASE + NE_CR) & 0x04) {}
+    // DMA the packet into TX page
+    ne2k_dma_write((unsigned int)TX_PAGE_START << 8, buf, len);
+    // Set TX byte count + start TX
+    ne2k_outb(NE2K_BASE + NE_TBCR0, len & 0xFF);
+    ne2k_outb(NE2K_BASE + NE_TBCR1, (len >> 8) & 0xFF);
+    ne2k_outb(NE2K_BASE + NE_CR, 0x26);   // Start, TXP=1, RD2=0(?), STA=1
+    // Wait for PTX or TXE
+    unsigned int spin = 1000000;
+    while (spin--) {
+        unsigned int isr = ne2k_inb(NE2K_BASE + NE_ISR);
+        if (isr & 0x0A) {       // PTX(1) or TXE(8)
+            ne2k_outb(NE2K_BASE + NE_ISR, isr & 0x0A);  // ACK
+            return (isr & 0x02) ? 0 : -1;  // PTX=1 means success
+        }
+    }
+    return -1;
+}
+
+// Poll for received packets. Returns the bytes copied to out, or 0 if
+// nothing pending. Drains one packet at a time. maxlen caps the copy.
+static unsigned int ne2k_poll_rx(unsigned char *out, unsigned int maxlen) {
+    if (!ne2k_initialized) return 0;
+    // Read CURR via page 1
+    unsigned int saved_cr = ne2k_inb(NE2K_BASE + NE_CR);
+    ne2k_outb(NE2K_BASE + NE_CR, 0x62);    // STA, RD2, PS=1
+    unsigned int curr = ne2k_inb(NE2K_BASE + NE_CURR);
+    ne2k_outb(NE2K_BASE + NE_CR, saved_cr | 0x02);  // Back to page 0, start
+    unsigned int bnry = ne2k_inb(NE2K_BASE + NE_BNRY);
+    unsigned int next_pkt_page = bnry + 1;
+    if (next_pkt_page >= RX_PAGE_STOP) next_pkt_page = RX_PAGE_START;
+    if (next_pkt_page == curr) {
+        return 0;     // Empty
+    }
+
+    // Read 4-byte header at next_pkt_page
+    unsigned char hdr[4];
+    ne2k_dma_read((unsigned int)next_pkt_page << 8, hdr, 4);
+    // hdr[0]=status, hdr[1]=next_page, hdr[2..3]=packet length (LE, includes header)
+    unsigned int pkt_len = (unsigned int)hdr[2] | ((unsigned int)hdr[3] << 8);
+    unsigned int next_page = hdr[1];
+    unsigned int copy_len = pkt_len > 4 ? pkt_len - 4 : 0;
+    if (copy_len > maxlen) copy_len = maxlen;
+    if (copy_len > 0 && (hdr[0] & 0x01)) {
+        // Status OK — read packet body (skip 4-byte header)
+        ne2k_dma_read(((unsigned int)next_pkt_page << 8) + 4, out, copy_len);
+    } else {
+        copy_len = 0;
+    }
+    // Advance BNRY = next_page - 1, wrapping
+    if (next_page == RX_PAGE_START) {
+        ne2k_outb(NE2K_BASE + NE_BNRY, RX_PAGE_STOP - 1);
+    } else {
+        ne2k_outb(NE2K_BASE + NE_BNRY, next_page - 1);
+    }
+    // Clear PRX + OVW + RXE in ISR for hygiene
+    ne2k_outb(NE2K_BASE + NE_ISR, 0x15);
+    return copy_len;
+}
+// ============================================================
+// End of PM-native NE2000 driver.
+// ============================================================
+
+
 // Conventional-memory bounce buffer for talking to the real-mode
 // Crynwr packet driver under PMODE/W. The driver expects ES:DI /
 // DS:SI to point at real-mode-addressable memory (linear < 1 MB,
@@ -118,26 +327,133 @@ static unsigned int  pktdrv_bounce_seg     = 0;   // real-mode segment
 static unsigned int  pktdrv_bounce_sel     = 0;   // PM selector (unused, kept for free)
 static unsigned int  pktdrv_bounce_linear  = 0;   // flat-32 linear (= seg << 4)
 
+// Real-mode INT 0x60 thunk. PMODE/W's DPMI fn 0x0300 (Simulate Real
+// Mode INT) silently no-ops INT 0x60 — it returns CF=0 with the rmcs
+// untouched, never actually reaching Crynwr. Verified empirically:
+// driver_info / access_type / get_address / send_pkt all "succeed"
+// per DPMI but the bounce buffer stays at its pre-call contents and
+// no NE2000 TX command is ever issued. (Same behavior under DOS/32A.)
+//
+// Workaround: call DPMI fn 0x0301 (Call Real Mode Procedure With Far
+// Return) targeting a tiny real-mode stub at `pktdrv_thunk_seg:0`
+// containing `INT 0x60; RETF`. DPMI 0x0301 reliably dispatches to
+// the specified real-mode address, the stub issues INT 0x60 from
+// real mode (where Crynwr's IVT[0x60] hook fires correctly), Crynwr
+// IRETs back to the stub's RETF, and DPMI returns the modified rmcs
+// to us. Allocated once at init via DPMI fn 0x0100.
+static unsigned int  pktdrv_thunk_seg      = 0;   // real-mode segment of the int-60 thunk
+
 // DPMI fn 0x0100 — Allocate DOS Memory.
 // On entry: AX=0x0100, BX=number of paragraphs (16-byte units).
 // On exit (CF clear): AX=real-mode segment, DX=PM selector.
 // On error: CF set, AX=DOS error code, BX=largest paragraphs free.
+// Pre-allocated bounce buffer segment + flat-32 linear addr from
+// main() at startup. PMODE/W uses paging — `seg << 4` is NOT the
+// linear address that maps the conventional memory at that real-mode
+// segment. main() resolves the true linear address via DPMI fn
+// 0x0002 (Allocate Descriptor for Real-Mode Segment) followed by
+// fn 0x0006 (Get Selector Base Address) and stashes both globally.
+extern unsigned int pktdrv_preallocated_bounce_seg;
+extern unsigned int pktdrv_preallocated_bounce_linear;
+
 static int pktdrv_alloc_bounce(void) {
+    extern int write(int fd, const void *buf, unsigned int n);
+    write(1, "[ab:enter]", 10);
     if (pktdrv_bounce_seg != 0) {
-        return 0;  // already allocated
+        write(1, "[ab:cached]", 11);
+        return 0;
     }
-    unsigned int paragraphs = (PKTDRV_BOUNCE_SIZE + 15) / 16;
-    unsigned int regs[8] = {0};
-    regs[R_EAX] = 0x0100;
-    regs[R_EBX] = paragraphs;
-    unsigned char carry = pktdrv_int_invoke(0x31, regs);
-    if (carry) {
+    if (pktdrv_preallocated_bounce_seg == 0) {
+        write(1, "[ab:not-prealloced]", 19);
         return -1;
     }
-    pktdrv_bounce_seg    = regs[R_EAX] & 0xFFFF;
-    pktdrv_bounce_sel    = regs[R_EDX] & 0xFFFF;
-    pktdrv_bounce_linear = pktdrv_bounce_seg << 4;
+    pktdrv_bounce_seg    = pktdrv_preallocated_bounce_seg;
+    pktdrv_bounce_sel    = 0;
+    pktdrv_bounce_linear = pktdrv_preallocated_bounce_linear;
+    write(1, "[ab:from-prealloc]", 18);
     return 0;
+}
+
+// Pre-allocated thunk segment from main() (same shallow-stack
+// workaround as pktdrv_preallocated_bounce_seg — PMODE/W's DOS-alloc
+// hangs from deep stack).
+extern unsigned int pktdrv_preallocated_thunk_seg;
+
+static void _diag_hex32(const char *tag, unsigned int val);
+
+// Initialise the INT 0x60 thunk: take the segment main() pre-
+// allocated and write CD 60 CB at offset 0. Idempotent.
+static int pktdrv_alloc_thunk(void) {
+    extern int write(int fd, const void *buf, unsigned int n);
+    write(1, "[at:enter]", 10);
+    if (pktdrv_thunk_seg != 0) {
+        write(1, "[at:cached]", 11);
+        return 0;
+    }
+    if (pktdrv_preallocated_thunk_seg == 0) {
+        write(1, "[at:not-prealloced]", 19);
+        return -1;
+    }
+    unsigned int seg = pktdrv_preallocated_thunk_seg;
+    unsigned int linear = seg << 4;
+    // Write CD 60 CB at linear:0 (the real-mode INT 0x60 thunk).
+    unsigned char *thunk = (unsigned char *)linear;
+    thunk[0] = 0xCD;             // INT
+    thunk[1] = 0x60;             // vector 60h
+    thunk[2] = 0xCB;             // RETF (far return)
+    // Stash type filter bytes at offsets 4..15 (12 bytes total).
+    // Crynwr v11 NE2000 needs a real ethertype in the type pattern
+    // (0x00 0x00 doesn't match any real frame). We register six
+    // 2-byte patterns at consecutive offsets so a single thunk
+    // paragraph can serve multiple access_type registrations:
+    //   off 4..5  : ARP   = 0x08 0x06 (network byte order)
+    //   off 6..7  : IPv4  = 0x08 0x00
+    //   off 8..9  : IPv6  = 0x86 0xDD
+    //   off 10..11: 0x00 0x00 (reserved)
+    //   off 12..13: 0x00 0x00 (reserved)
+    //   off 14..15: 0x00 0x00 (reserved)
+    thunk[4] = 0x08; thunk[5] = 0x06;        // ARP
+    thunk[6] = 0x08; thunk[7] = 0x00;        // IPv4
+    thunk[8] = 0x86; thunk[9] = 0xDD;        // IPv6
+    thunk[10] = 0; thunk[11] = 0;
+    thunk[12] = 0; thunk[13] = 0;
+    thunk[14] = 0; thunk[15] = 0;
+    pktdrv_thunk_seg = seg;
+    // Dump thunk content (16 bytes) as 4 dwords for verification.
+    _diag_hex32("tk03", ((unsigned int)thunk[0]<<24)
+                       |((unsigned int)thunk[1]<<16)
+                       |((unsigned int)thunk[2]<<8)
+                       |(unsigned int)thunk[3]);
+    _diag_hex32("tk47", ((unsigned int)thunk[4]<<24)
+                       |((unsigned int)thunk[5]<<16)
+                       |((unsigned int)thunk[6]<<8)
+                       |(unsigned int)thunk[7]);
+    _diag_hex32("tkSG", seg);
+    write(1, "[at:ready]", 10);
+    return 0;
+}
+
+// Call the thunk via DPMI fn 0x0301 (Call Real Mode Procedure With
+// Far Return). The caller has already populated `rm` with the inputs
+// they want Crynwr to see (ax/bx/cx/dx/si/di/es/ds plus any segment
+// regs). We overwrite rm.cs/rm.ip to point at our int-60 thunk and
+// dispatch. Returns 0 if DPMI itself succeeded (CF clear); the
+// caller still needs to inspect rm.flags for the Crynwr-side CF.
+static int pktdrv_call_int60_thunk(pktdrv_rmcs_t *rm) {
+    if (pktdrv_thunk_seg == 0) {
+        return -1;
+    }
+    rm->cs = (unsigned short)pktdrv_thunk_seg;
+    rm->ip = 0;
+    rm->ss = 0;
+    rm->sp = 0;
+    unsigned int dpmi[8] = {0};
+    dpmi[R_EAX] = 0x0301;
+    dpmi[R_EBX] = 0;
+    dpmi[R_ECX] = 0;
+    dpmi[R_EDI] = (unsigned int)(unsigned long)rm;
+    unsigned char carry = pktdrv_int_invoke(0x31, dpmi);
+    return carry ? -1 : 0;
 }
 
 // DPMI fn 0x0300 — Simulate Real Mode Interrupt. Required to reach
@@ -283,6 +599,8 @@ int pktdrv_detect(void) {
     return 0;
 }
 
+static void _diag_hex32(const char *tag, unsigned int val);
+
 // AH=0x06 get_address — fetch the NIC's MAC into `out[6]`.
 // Routed through DPMI 0x0300; ES:DI points at the bounce buffer
 // (real-mode addressable). After the call, copy the 6 MAC bytes
@@ -328,12 +646,30 @@ static int pktdrv_get_addr(unsigned char out[6]) {
         rm.es = (unsigned short)pktdrv_bounce_seg;
         rm.ds = 0; rm.fs = 0; rm.gs = 0;
         rm.ip = 0; rm.cs = 0; rm.sp = 0; rm.ss = 0;
-        unsigned int dpmi[8] = {0};
-        dpmi[R_EAX] = 0x0300;
-        dpmi[R_EBX] = (unsigned int)pktdrv_int_num & 0xFF;
-        dpmi[R_ECX] = 0;
-        dpmi[R_EDI] = (unsigned int)(unsigned long)&rm;
-        unsigned char carry = pktdrv_int_invoke(0x31, dpmi);
+        unsigned char carry;
+        if (pktdrv_thunk_seg != 0) {
+            carry = (unsigned char)(pktdrv_call_int60_thunk(&rm) ? 1 : 0);
+        } else {
+            unsigned int dpmi[8] = {0};
+            dpmi[R_EAX] = 0x0300;
+            dpmi[R_EBX] = (unsigned int)pktdrv_int_num & 0xFF;
+            dpmi[R_ECX] = 0;
+            dpmi[R_EDI] = (unsigned int)(unsigned long)&rm;
+            carry = pktdrv_int_invoke(0x31, dpmi);
+        }
+        _diag_hex32("gaDC", (unsigned int)carry);
+        _diag_hex32("gaAX", rm.eax);
+        _diag_hex32("gaBX", rm.ebx);
+        _diag_hex32("gaDX", rm.edx);
+        _diag_hex32("gaFL", (unsigned int)rm.flags);
+        // Also dump bounce buffer's first 6 bytes (the MAC if Crynwr wrote it).
+        unsigned char *bb = (unsigned char *)pktdrv_bounce_linear;
+        _diag_hex32("bb01", ((unsigned int)bb[0] << 24)
+                          | ((unsigned int)bb[1] << 16)
+                          | ((unsigned int)bb[2] << 8)
+                          | (unsigned int)bb[3]);
+        _diag_hex32("bb45", ((unsigned int)bb[4] << 24)
+                          | ((unsigned int)bb[5] << 16));
         if (carry) {
             return -1;
         }
@@ -359,29 +695,71 @@ static int pktdrv_get_addr(unsigned char out[6]) {
 // Under dos_emu the legacy bare-INT path remains as a fallback —
 // dos_emu's AH=02 hook reads the linear receiver value out of EDI
 // regardless.
+// Catch-all type filter: 2 bytes, value 0x0000. Crynwr V11 supports
+// type_len > 0 with data — we use 2 bytes 0x0000 which matches "any"
+// per the convention some Crynwr drivers prefer over type_len=0 (which
+// can be rejected silently).
+static unsigned char _pktdrv_catchall_type[2] = {0, 0};
+
+static void _diag_hex32(const char *tag, unsigned int val);
+
+// Diag: emit "[tag=XXXXXXXX]" to fd 1. 4-byte tag, 8 hex digits.
+static void _diag_hex32(const char *tag, unsigned int val) {
+    extern int write(int fd, const void *buf, unsigned int n);
+    char out[16];
+    out[0] = '[';
+    out[1] = tag[0];
+    out[2] = tag[1];
+    out[3] = tag[2];
+    out[4] = tag[3];
+    out[5] = '=';
+    for (int i = 0; i < 8; i++) {
+        unsigned int nib = (val >> ((7 - i) * 4)) & 0xF;
+        out[6 + i] = (char)(nib < 10 ? '0' + nib : 'a' + nib - 10);
+    }
+    out[14] = ']';
+    out[15] = 0;
+    write(1, out, 15);
+}
+
 static int pktdrv_access(unsigned int linear_receiver) {
+    extern int write(int fd, const void *buf, unsigned int n);
     if (pktdrv_int_num == 0) {
         return -1;
     }
     static pktdrv_rmcs_t rm;
-    rm.edi = linear_receiver & 0xFFFF;     // offset
-    rm.esi = 0;
+    rm.edi = linear_receiver & 0xFFFF;     // offset (receiver real-mode IP)
+    // DS:SI = real-mode pointer to type bytes (thunk paragraph, off 4 = ARP).
+    rm.esi = 4;                             // ARP type pattern at thunk[4..5]
     rm.ebp = 0; rm.reserved = 0;
-    rm.ebx = 0;                             // if_type=0 (driver default)
+    rm.ebx = 0xFFFF;                        // if_type=0xFFFF (any/wildcard)
     rm.edx = 0;                             // if_number=0 (first card)
-    rm.ecx = 0;                             // type_len=0 (catch-all type)
+    rm.ecx = 2;                             // type_len=2 (match 2-byte ethertype)
     rm.eax = 0x0201;                        // AH=02 access_type, AL=01 Ethernet DIX
     rm.flags = 0;
     rm.es = (unsigned short)((linear_receiver >> 16) & 0xFFFF);
-    rm.ds = 0; rm.fs = 0; rm.gs = 0;
+    rm.ds = (unsigned short)pktdrv_thunk_seg;  // type bytes live in our thunk paragraph
+    rm.fs = 0; rm.gs = 0;
     rm.ip = 0; rm.cs = 0; rm.sp = 0; rm.ss = 0;
 
-    unsigned int dpmi[8] = {0};
-    dpmi[R_EAX] = 0x0300;
-    dpmi[R_EBX] = (unsigned int)pktdrv_int_num & 0xFF;
-    dpmi[R_ECX] = 0;
-    dpmi[R_EDI] = (unsigned int)(unsigned long)&rm;
-    unsigned char carry = pktdrv_int_invoke(0x31, dpmi);
+    // Route INT 0x60 through the real-mode thunk via DPMI 0x0301 if
+    // available — DPMI 0x0300 silently no-ops INT 0x60 in PMODE/W.
+    unsigned char carry;
+    if (pktdrv_thunk_seg != 0) {
+        carry = (unsigned char)(pktdrv_call_int60_thunk(&rm) ? 1 : 0);
+    } else {
+        unsigned int dpmi[8] = {0};
+        dpmi[R_EAX] = 0x0300;
+        dpmi[R_EBX] = (unsigned int)pktdrv_int_num & 0xFF;
+        dpmi[R_ECX] = 0;
+        dpmi[R_EDI] = (unsigned int)(unsigned long)&rm;
+        carry = pktdrv_int_invoke(0x31, dpmi);
+    }
+    _diag_hex32("acDC", (unsigned int)carry);     // DPMI carry
+    _diag_hex32("acAX", rm.eax);
+    _diag_hex32("acBX", rm.ebx);
+    _diag_hex32("acDX", rm.edx);
+    _diag_hex32("acFL", (unsigned int)rm.flags);
     if (carry) {
         // DPMI 0x0300 itself failed (no DPMI host?). Try bare INT
         // for dos_emu compatibility. dos_emu intercepts INT 0x60
@@ -538,22 +916,46 @@ static void pktdrv_register_polling_rx(void) {
 //   5. pktdrv_register_polling_rx — AH=0x99, the dos_emu RX
 //      bypass. No-op on real DOS where AH=0x99 isn't implemented.
 int pktdrv_init(unsigned char mac[6]) {
+    extern int write(int fd, const void *buf, unsigned int n);
+    write(1, "[pi:enter]", 10);
+    // PM-native NE2000 path: skip Crynwr entirely.
+    if (ne2k_init_direct(mac) == 0) {
+        write(1, "[pi:ne2k-ok]", 12);
+        // Mark int_num as a sentinel so pktdrv_send takes the
+        // direct path below, not the Crynwr fallback.
+        pktdrv_int_num = -1;
+        // Dump the MAC for sanity
+        char buf[40] = "[ne2k:mac=XXXXXXXXXXXX]";
+        static const char hex[] = "0123456789abcdef";
+        for (int i = 0; i < 6; i++) {
+            buf[10 + i*2]     = hex[(mac[i] >> 4) & 0xF];
+            buf[10 + i*2 + 1] = hex[mac[i] & 0xF];
+        }
+        write(1, buf, 23);
+        return 0;
+    }
+    write(1, "[pi:ne2k-fail-fallback-crynwr]", 30);
     if (pktdrv_detect() == 0) {
+        write(1, "[pi:no-driver]", 14);
         return -1;
     }
-    // Allocate the conventional-memory bounce buffer first — used
-    // by pktdrv_get_addr / pktdrv_send below, and silently handed
-    // to the receiver thunk for the RX seg:offset encoding. On
-    // dos_emu DPMI 0x0100 returns success and we get a real
-    // segment; on a host without DPMI the call sets CF and we
-    // continue without a bounce buffer (fallback flat-pointer
-    // paths still work under emulation).
+    write(1, "[pi:detected]", 13);
+    // pktdrv_alloc_bounce reads the segment pre-allocated by main()
+    // (PMODE/W's INT 21h AH=0x48 hangs from deep stack frames; main()
+    // does the alloc while shallow and stores it to a global).
     (void)pktdrv_alloc_bounce();
+    write(1, "[pi:bounce-done]", 16);
+    if (pktdrv_alloc_thunk() != 0) {
+        // Without the thunk, INT 0x60 calls won't reach Crynwr under
+        // PMODE/W. Keep going (dos_emu doesn't need it) but log it.
+        write(1, "[pi:no-thunk]", 13);
+    }
 
     unsigned int receiver_linear;
-    extern int write(int fd, const void *buf, unsigned int n);
     if (pktdrv_alloc_dpmi_callback() == 0) {
         write(1, "[dpmi:cb-ok]", 12);
+        _diag_hex32("dpSG", pktdrv_dpmi_seg);
+        _diag_hex32("dpOF", pktdrv_dpmi_off);
         // DPMI trampoline succeeded — encode its real-mode
         // seg:offset for access_type's ES:DI.
         receiver_linear = (pktdrv_dpmi_seg << 16) | (pktdrv_dpmi_off & 0xFFFF);
@@ -562,15 +964,104 @@ int pktdrv_init(unsigned char mac[6]) {
         receiver_linear = (unsigned int)(unsigned long)
                           &uc386dos_pktdrv_receiver;
     }
+    write(1, "[pi:pre-access]", 15);
+
+    // Pre-cleanup: release any stale subscription. Crynwr v11 may
+    // hold residual state from a prior process that crashed without
+    // calling release_type. AH=0x03, BX=0xFFFF means "release all".
+    if (pktdrv_thunk_seg != 0) {
+        static pktdrv_rmcs_t rrm;
+        rrm.edi = 0; rrm.esi = 0; rrm.ebp = 0; rrm.reserved = 0;
+        rrm.ebx = 0xFFFF;                 // BX = handle (0xFFFF = all)
+        rrm.edx = 0; rrm.ecx = 0;
+        rrm.eax = 0x0300;                 // AH=0x03 release_type
+        rrm.flags = 0;
+        rrm.es = 0; rrm.ds = 0; rrm.fs = 0; rrm.gs = 0;
+        rrm.ip = 0; rrm.cs = 0; rrm.sp = 0; rrm.ss = 0;
+        (void)pktdrv_call_int60_thunk(&rrm);
+        _diag_hex32("rlAX", rrm.eax);
+        _diag_hex32("rlFL", (unsigned int)rrm.flags);
+    }
+
     if (pktdrv_access(receiver_linear) != 0) {
+        write(1, "[pi:access-fail]", 16);
         pktdrv_int_num = 0;
         return -2;
     }
+    write(1, "[pi:access-ok]", 14);
+
+    // Set receive mode to 3 (broadcast + own-node). Some Crynwr drivers
+    // default to mode 1 (receiver off) — without this call, access_type
+    // returns a handle but no packets get delivered to our callback.
+    {
+        static pktdrv_rmcs_t rm;
+        rm.edi = 0; rm.esi = 0; rm.ebp = 0; rm.reserved = 0;
+        rm.ebx = (unsigned int)pktdrv_handle;   // BX = handle
+        rm.edx = 0;
+        rm.ecx = 3;                              // CX = mode 3 (broadcast + node)
+        rm.eax = 0x1400;                         // AH=0x14 set_rcv_mode
+        rm.flags = 0;
+        rm.es = 0; rm.ds = 0; rm.fs = 0; rm.gs = 0;
+        rm.ip = 0; rm.cs = 0; rm.sp = 0; rm.ss = 0;
+        if (pktdrv_thunk_seg != 0) {
+            (void)pktdrv_call_int60_thunk(&rm);
+        }
+        _diag_hex32("rmAX", rm.eax);
+        _diag_hex32("rmDX", rm.edx);
+        _diag_hex32("rmFL", (unsigned int)rm.flags);
+    }
+
     if (pktdrv_get_addr(mac) != 0) {
+        write(1, "[pi:getaddr-fail]", 17);
         pktdrv_int_num = 0;
         return -3;
     }
+    write(1, "[pi:getaddr-ok]", 15);
+    // Dump the MAC bytes we actually got. If they're 52:54:00:12:34:56,
+    // DPMI 0x0300 worked. If zeros, DPMI didn't actually invoke the
+    // real-mode INT (silent failure).
+    {
+        char buf[40] = "[pi:mac=";
+        for (int i = 0; i < 6; i++) {
+            unsigned int b = mac[i];
+            unsigned int hi = (b >> 4) & 0xF;
+            unsigned int lo = b & 0xF;
+            buf[8 + i*2] = (hi < 10) ? ('0' + hi) : ('a' + hi - 10);
+            buf[8 + i*2 + 1] = (lo < 10) ? ('0' + lo) : ('a' + lo - 10);
+        }
+        buf[20] = ']';
+        write(1, buf, 21);
+    }
+    // Dump key state as decimals so we can verify they're sensible.
+    {
+        char buf[32] = "[pi:h=";
+        unsigned int h = (unsigned int)pktdrv_handle;
+        buf[6] = '0' + ((h / 10000) % 10);
+        buf[7] = '0' + ((h / 1000) % 10);
+        buf[8] = '0' + ((h / 100) % 10);
+        buf[9] = '0' + ((h / 10) % 10);
+        buf[10] = '0' + (h % 10);
+        buf[11] = ',';
+        buf[12] = 'b';
+        buf[13] = '=';
+        unsigned int s = pktdrv_bounce_seg;
+        buf[14] = '0' + ((s / 10000) % 10);
+        buf[15] = '0' + ((s / 1000) % 10);
+        buf[16] = '0' + ((s / 100) % 10);
+        buf[17] = '0' + ((s / 10) % 10);
+        buf[18] = '0' + (s % 10);
+        buf[19] = ',';
+        buf[20] = 'i';
+        buf[21] = '=';
+        unsigned int i = (unsigned int)pktdrv_int_num;
+        buf[22] = '0' + ((i / 100) % 10);
+        buf[23] = '0' + ((i / 10) % 10);
+        buf[24] = '0' + (i % 10);
+        buf[25] = ']';
+        write(1, buf, 26);
+    }
     pktdrv_register_polling_rx();
+    write(1, "[pi:done]", 9);
     return 0;
 }
 
@@ -583,7 +1074,10 @@ int pktdrv_init(unsigned char mac[6]) {
 // AH=04 hook handles that, real DOS doesn't.
 int pktdrv_send(const unsigned char *buf, unsigned int len) {
     extern int write(int fd, const void *buf, unsigned int n);
-    write(1, "[ps:enter]", 10);
+    // PM-native NE2000 path
+    if (ne2k_initialized) {
+        return ne2k_send_direct(buf, len);
+    }
     if (pktdrv_int_num == 0) {
         return -1;
     }
@@ -600,9 +1094,7 @@ int pktdrv_send(const unsigned char *buf, unsigned int len) {
             (unsigned int)pktdrv_int_num, regs);
         return carry ? -1 : 0;
     }
-    write(1, "[ps:cp]", 7);
     memcpy((unsigned char *)pktdrv_bounce_linear, buf, len);
-    write(1, "[ps:rm]", 7);
     static pktdrv_rmcs_t rm;
     rm.edi = 0;
     rm.esi = 0;                                 // SI offset = 0 within bounce
@@ -620,12 +1112,30 @@ int pktdrv_send(const unsigned char *buf, unsigned int len) {
     dpmi[R_EBX] = (unsigned int)pktdrv_int_num & 0xFF;
     dpmi[R_ECX] = 0;
     dpmi[R_EDI] = (unsigned int)(unsigned long)&rm;
-    write(1, "[ps:int]", 8);
-    unsigned char carry = pktdrv_int_invoke(0x31, dpmi);
-    write(1, "[ps:int-done]", 13);
-    if (carry || (rm.flags & 1)) {
+    unsigned char carry;
+    if (pktdrv_thunk_seg != 0) {
+        carry = (unsigned char)(pktdrv_call_int60_thunk(&rm) ? 1 : 0);
+        (void)dpmi;
+    } else {
+        carry = pktdrv_int_invoke(0x31, dpmi);
+    }
+    if (carry) {
+        write(1, "[ps:dpmi-fail]", 14);
         return -1;
     }
+    if (rm.flags & 1) {
+        // CF set in real-mode flags = Crynwr returned error.
+        // AH = error code per Crynwr spec.
+        char buf[24] = "[ps:cf-set,err=";
+        unsigned int ah = (rm.eax >> 8) & 0xFF;
+        buf[15] = '0' + ((ah / 100) % 10);
+        buf[16] = '0' + ((ah / 10) % 10);
+        buf[17] = '0' + (ah % 10);
+        buf[18] = ']';
+        write(1, buf, 19);
+        return -1;
+    }
+    write(1, "[ps:ok]", 7);
     return 0;
 }
 
@@ -633,6 +1143,10 @@ int pktdrv_send(const unsigned char *buf, unsigned int len) {
 // written (clamped to maxlen) or 0 if nothing's queued. Truncates
 // silently on overflow.
 unsigned int pktdrv_recv(unsigned char *out, unsigned int maxlen) {
+    // PM-native NE2000 path: poll the NIC ring directly.
+    if (ne2k_initialized) {
+        return ne2k_poll_rx(out, maxlen);
+    }
     if (!pktdrv_rx_pending) {
         return 0;
     }
@@ -646,5 +1160,8 @@ unsigned int pktdrv_recv(unsigned char *out, unsigned int maxlen) {
     return n;
 }
 
-// True when a Crynwr driver was successfully attached at init.
-int pktdrv_is_active(void) { return pktdrv_int_num != 0; }
+// True when either Crynwr is attached OR the PM-native NE2000 driver
+// is initialised. Either way, pktdrv_send/recv will do something useful.
+int pktdrv_is_active(void) {
+    return ne2k_initialized || (pktdrv_int_num != 0 && pktdrv_int_num != -1);
+}

@@ -3,5 +3,9 @@ test-server.crt
 test-server.key
 test-server-ca.pem
 freedos-tls.img
+freedos-tls-*.img
 qemu-tls.log
+qemu-tls-*.log
 tls-out.txt
+tls-server.log
+tlstest-wrapped.in

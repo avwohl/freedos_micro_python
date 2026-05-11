@@ -159,6 +159,148 @@ patch_main_startup_markers() {
     ' "$F" > "$F.tmp" && mv "$F.tmp" "$F"
 }
 
+# Patch upstream/ports/minimal/main.c to pre-allocate the pktdrv bounce
+# buffer and INT 0x60 real-mode thunk segment EARLY in main() — before
+# MicroPython grows the C stack. Background:
+#
+#   * PMODE/W's INT 21h AH=0x48 (DOS Allocate Memory) deterministically
+#     hangs when called from a deep stack frame. The MicroPython REPL +
+#     interpreter pushes us well past the depth where this triggers, so
+#     by the time pktdrv_init wants a real-mode bounce buffer the
+#     allocation never returns. Allocating it from the top of main()
+#     while the stack is shallow sidesteps the bug.
+#   * The INT 0x60 real-mode thunk paragraph that pktdrv_call_int60_thunk
+#     uses (DPMI fn 0x0301 dispatch) MUST be allocated via DPMI fn 0x0100
+#     (DPMI Allocate DOS Memory), not INT 21h AH=0x48. PMODE/W's DPMI
+#     host hangs when 0x0301 dispatches to a segment it doesn't know
+#     about. 0x0100 makes the host record the allocation; 0x0301 then
+#     works.
+#
+# Pktdrv code (port/pktdrv_uc386dos.c) reads the three globals
+# `pktdrv_preallocated_bounce_seg`, `pktdrv_preallocated_bounce_linear`,
+# and `pktdrv_preallocated_thunk_seg` and skips its own AH=0x48 path
+# when they're non-zero. Idempotent: skips if the globals are already
+# declared in the file.
+patch_main_pktdrv_prealloc() {
+    F="upstream/ports/minimal/main.c"
+    if [ ! -f "$F" ]; then return 0; fi
+    if grep -q "pktdrv_preallocated_bounce_seg" "$F"; then
+        return 0
+    fi
+    echo "micropython: patching ports/minimal/main.c with pktdrv bounce + thunk pre-alloc …"
+    awk '
+        # Inject globals + helper just before int main(...). Keying on
+        # the "int main(" line keeps us robust to whether the startup-
+        # marker patch has already injected its [mp-main-entered] line
+        # — we always land in the right spot.
+        /^int main\(int argc, char \*\*argv\) \{/ && !inserted {
+            print "// PMODE/W'\''s INT 21h AH=0x48 (Allocate Memory) deterministically hangs"
+            print "// when called from a deep stack frame (empirically: 400+ bytes of"
+            print "// extra locals on top of MicroPython'\''s interpreter stack triggers"
+            print "// it; the unbloated baseline works). Workaround: pre-allocate the"
+            print "// bounce buffer early in main(), before MicroPython builds up its"
+            print "// stack depth, and store it in a global the pktdrv code reads."
+            print "extern unsigned char pktdrv_int_invoke(unsigned int, unsigned int *);"
+            print "unsigned int pktdrv_preallocated_bounce_seg = 0;"
+            print "unsigned int pktdrv_preallocated_bounce_linear = 0;"
+            print "unsigned int pktdrv_preallocated_thunk_seg = 0;"
+            print ""
+            print "static void _preallocate_bounce_buffer(void) {"
+            print "    write(1, \"[bounce:pre-alloc]\\n\", 19);"
+            print "    unsigned int regs[8] = {0};"
+            print "    regs[0] = 0x4800;       // AH=0x48 Allocate Memory"
+            print "    regs[1] = 128;          // 128 paragraphs = 2 KB"
+            print "    unsigned char carry = pktdrv_int_invoke(0x21, regs);"
+            print "    write(1, \"[bounce:post-alloc]\\n\", 20);"
+            print "    if (carry) return;"
+            print "    unsigned int seg = regs[0] & 0xFFFF;"
+            print "    pktdrv_preallocated_bounce_seg = seg;"
+            print ""
+            print "    // PMODE/W uses paging — `seg << 4` is NOT the flat-32 linear"
+            print "    // address that maps the conventional memory at that real-mode"
+            print "    // segment. We need to ask DPMI for a selector that maps the"
+            print "    // segment, then read its linear base."
+            print "    //"
+            print "    //   DPMI fn 0x0002: allocate descriptor for real-mode segment"
+            print "    //     in: AX=0x0002, BX=segment   out: AX=selector"
+            print "    //   DPMI fn 0x0006: get selector base address"
+            print "    //     in: AX=0x0006, BX=selector  out: CX=base_high, DX=base_low"
+            print "    unsigned int r2[8] = {0};"
+            print "    r2[0] = 0x0002;"
+            print "    r2[1] = seg;"
+            print "    pktdrv_int_invoke(0x31, r2);"
+            print "    unsigned int sel = r2[0] & 0xFFFF;"
+            print "    unsigned int r3[8] = {0};"
+            print "    r3[0] = 0x0006;"
+            print "    r3[1] = sel;"
+            print "    pktdrv_int_invoke(0x31, r3);"
+            print "    unsigned int base_high = r3[2] & 0xFFFF;   // CX"
+            print "    unsigned int base_low  = r3[3] & 0xFFFF;   // DX"
+            print "    pktdrv_preallocated_bounce_linear = (base_high << 16) | base_low;"
+            print ""
+            print "    // Also pre-allocate 1 paragraph for the INT 0x60 real-mode thunk."
+            print "    // Use DPMI fn 0x0100 (not INT 21h AH=0x48) so the DPMI host"
+            print "    // registers this segment as one it knows about — DPMI 0x0301"
+            print "    // dispatch to a non-DPMI-allocated segment hangs on PMODE/W."
+            print "    write(1, \"[thunk:pre-alloc]\\n\", 18);"
+            print "    unsigned int rt[8] = {0};"
+            print "    rt[0] = 0x0100;          // AX=0x0100 (DPMI Allocate DOS Memory)"
+            print "    rt[1] = 1;               // BX = 1 paragraph"
+            print "    unsigned char tcarry = pktdrv_int_invoke(0x31, rt);"
+            print "    write(1, \"[thunk:post-alloc]\\n\", 19);"
+            print "    if (!tcarry) {"
+            print "        pktdrv_preallocated_thunk_seg = rt[0] & 0xFFFF;"
+            print "    }"
+            print "}"
+            print ""
+            inserted = 1
+            in_main = 1
+            print
+            next
+        }
+        # Inject the call to _preallocate_bounce_buffer() right after
+        # `stack_top = (char *)&stack_dummy;` — that is the first real
+        # statement inside main(), so the stack is at its shallowest.
+        in_main && /stack_top = \(char \*\)&stack_dummy;/ {
+            print
+            print ""
+            print "    // Pre-allocate the pktdrv bounce buffer NOW, while the stack is"
+            print "    // shallow. PMODE/W'\''s AH=0x48 hangs from deep stacks."
+            print "    _preallocate_bounce_buffer();"
+            in_main = 0
+            next
+        }
+        { print }
+    ' "$F" > "$F.tmp" && mv "$F.tmp" "$F"
+}
+
+# Disable upstream/ports/minimal/main.c's stub `mp_lexer_new_from_file`
+# and `mp_import_stat`. The minimal port ships them as no-op
+# OSError/NO_EXIST stubs because it has no filesystem; our port DOES
+# have one (`port/file_uc386dos.c` defines real implementations
+# backed by INT 21h). Without the rename we get duplicate-symbol
+# link errors — or worse, the stubs win and `import foo` /
+# `open()` silently fail. Renaming to `_unused_*` defangs the
+# minimal port copies while keeping the file otherwise intact.
+# Idempotent: skips if the rename has already been applied.
+patch_main_disable_fs_stubs() {
+    F="upstream/ports/minimal/main.c"
+    if [ ! -f "$F" ]; then return 0; fi
+    if grep -q "_unused_mp_lexer_new_from_file" "$F"; then
+        return 0
+    fi
+    if ! grep -q "^mp_lexer_t \*mp_lexer_new_from_file(qstr filename)" "$F"; then
+        echo "micropython: warn: ports/minimal/main.c FS stub shape changed — skipping rename." >&2
+        return 0
+    fi
+    echo "micropython: renaming ports/minimal/main.c FS stubs to _unused_* …"
+    sed -i.bak \
+        -e 's|^mp_lexer_t \*mp_lexer_new_from_file(qstr filename) {|static mp_lexer_t *_unused_mp_lexer_new_from_file(qstr filename) { (void)filename;|' \
+        -e 's|^mp_import_stat_t mp_import_stat(const char \*path) {|static mp_import_stat_t _unused_mp_import_stat(const char *path) { (void)path;|' \
+        "$F"
+    rm -f "$F.bak"
+}
+
 # Patch upstream/extmod/axtls-include/config.h to flip CONFIG_SSL_HAS_PEM
 # and CONFIG_SSL_CERT_VERIFICATION from undef to defined. Upstream MP
 # ports compile axtls in skeleton mode without verification because
@@ -208,6 +350,8 @@ if [ -d upstream ]; then
     fetch_axtls
     patch_modlwip_loopback_poll
     patch_main_startup_markers
+    patch_main_pktdrv_prealloc
+    patch_main_disable_fs_stubs
     patch_axtls_config_verify
     patch_axtls_endian_include
     exit 0
@@ -234,5 +378,7 @@ fetch_lwip
 fetch_axtls
 patch_modlwip_loopback_poll
 patch_main_startup_markers
+patch_main_pktdrv_prealloc
+patch_main_disable_fs_stubs
 patch_axtls_config_verify
 patch_axtls_endian_include

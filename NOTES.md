@@ -678,3 +678,183 @@ MIT — see `upstream/LICENSE` after running `./fetch.sh`. The thin
 uc386 port shim, when written, inherits GPL-3.0 from the parent
 uc386 repo (matches the convention used by the in-tree GNU
 utility addons).
+
+## Session log 2026-05-10/11 — TLS rig debug → PM-native NE2000 driver
+
+The TLS rig (`rigs/tls-rig/`) needs lwIP to actually move packets on the
+wire. We started this session expecting the existing Crynwr packet-driver
+path (`pktdrv_uc386dos.c`'s DPMI 0x0300 → INT 0x60) to Just Work. It
+didn't, in interesting ways. Final outcome: full TCP-handshake-on-the-wire
+through a PM-native NE2000 driver that bypasses Crynwr entirely.
+
+### What we found out about PMODE/W
+
+The bundled DPMI host in PMODE/W has at least two real, repeatable bugs
+relevant to packet drivers:
+
+1. **`int 0x60` from protected mode is silently no-op'd.** Both bare
+   `int 0x60` and `DPMI fn 0x0300` (Simulate Real-Mode INT 0x60) return
+   with CF=0 and the rmcs registers unchanged. Crynwr's IVT[0x60] hook
+   is correctly installed (we verified via DPMI 0x0200) and works
+   perfectly for real-mode callers (verified with a 16-bit `RMTEST.COM`
+   that registers and reads MAC bytes). It's specifically the PM-side
+   dispatch for vector 0x60 that drops the call. Other vectors (e.g.
+   INT 0x21) dispatch correctly through DPMI 0x0300 from the same
+   binary.
+
+2. **`DPMI fn 0x0303` (Allocate Real-Mode Callback) returns a trampoline
+   that is unreachable from PM via `DPMI fn 0x0301`.** The trampoline
+   address (e.g. `0x3064:0x0064` in our QEMU test) is a real allocated
+   callback gate — `access_type` happily registers it as the receiver,
+   the address is plausible, the call to `0x0303` returns CF=0 and a
+   non-zero seg:offset. But invoking it directly from PM via DPMI 0x0301
+   hangs the program. Crynwr similarly never delivers RX packets to it
+   despite the NE2000 ISR showing `PRX` (packet received) bits being
+   acknowledged in real-mode IRQ context.
+
+DOS/32A (added as an alternative in `pyle.py`'s `--stub-kind=dos32a`)
+exhibits the **same** dispatch behavior for INT 0x60 — it's not
+PMODE/W-specific. Both extenders' bundled DPMI hosts have this gap.
+
+### What we built — the things that work
+
+#### 1. `pyle` — pure-Python OMF→MZ+LE linker (in `addons/harness/pyle.py`
+of the `uc386` repo)
+
+Replaces wlink for the `MP.EXE` build path. ~1000 lines, handles SEGDEF/
+PUBDEF/EXTDEF/LEDATA/FIXUPP/MODEND. Critical fix discovered along the
+way: the LE writer must NOT pre-bake target VAs into text/data buffers
+(the LE loader overwrites them with the FIXUP records).
+
+Also added an experimental `bind_dos32a_stub()` that takes a raw
+`DOS32A.EXE` and produces a pyle-compatible MZ stub via the
+SUNSYS Bind transform (reverse-engineered from `SBIND.ASM`).
+
+#### 2. `ES = DS` fix in `_pktdrv_int_invoke` (asm)
+
+The asm helper used by the C side to issue any INT n didn't preserve or
+set ES. DOS leaves ES = PSP-selector (256-byte limit) at program start.
+DPMI calls that pass an rmcs pointer via ES:EDI then fail (or hang for
+DPMI 0x0301) because the flat-32 EDI exceeds the PSP selector's limit.
+The fix: `push es; push ds; pop es; ... int n ...; pop es`. This
+unblocked the DPMI 0x0301 thunk experiments below.
+
+#### 3. The DPMI 0x0301 thunk approach (committed as fallback)
+
+Workaround for PMODE/W bug (1) above: allocate a 16-byte real-mode
+block via DPMI fn 0x0100, write `CD 60 CB` (`int 0x60; retf`) into it,
+call it via DPMI fn 0x0301 (Call Real Mode Procedure With Far Return).
+This *does* dispatch INT 0x60 to Crynwr correctly — the real-mode
+flags come back populated, the rmcs registers reflect Crynwr's response,
+`access_type` returns a real handle, `get_address` writes the real MAC
+into the bounce buffer. TX through this path works.
+
+The thunk code lives in `pktdrv_call_int60_thunk()` (callable when
+`pktdrv_thunk_seg != 0`). The thunk-segment is pre-allocated in
+`main()` (along with the bounce buffer) because PMODE/W's INT 21h
+AH=0x48 hangs from deep stack frames — `pktdrv_alloc_thunk()` reads
+the pre-allocated segment from a global instead of doing a fresh
+allocation.
+
+#### 4. PM-native NE2000 driver (current default in `pktdrv_uc386dos.c`)
+
+After the thunk approach proved that PMODE/W bug (2) blocked RX
+delivery, we wrote a small PM-native NE2000 driver that talks directly
+to the NIC's IO ports. Crynwr is no longer loaded in the rig. The
+driver lives in the same file (look for the `// PM-native NE2000
+driver` banner). IO helpers (`ne2k_outb` / `ne2k_inb` / `ne2k_outsw` /
+`ne2k_insw`) live in `i386_dos_libc.asm` as raw `out dx, al` /
+`in al, dx` / `rep outsw` / `rep insw` instructions — PMODE/W grants
+PM clients full IO permission by default, so no `DPMI fn 0x0E01`
+gymnastics are needed. The driver:
+
+- Resets the NIC, programs DCR/RCR/TCR/IMR with IRQs masked off
+- Reads MAC from the on-chip PROM via remote DMA
+- Writes our MAC into PAR0..5
+- Sets up the standard 0x46..0x80 RX ring page boundaries
+- TX: copy frame to TX page via remote DMA, fire CMD with TXP bit
+- RX: poll-driven via the existing `pktdrv_recv` interface; reads
+  CURR via page 1, compares to BNRY, drains one packet per call
+
+The `pktdrv_init` / `pktdrv_send` / `pktdrv_recv` public functions
+now check `ne2k_initialized` first and route to the direct driver if
+set, falling back to the (now-dead) Crynwr/thunk path otherwise.
+
+### What works end-to-end
+
+With the PM-native NE2000 driver:
+
+```
+[ne2k:init][ne2k:reset-ok][ne2k:mac-read][ne2k:ready][pi:ne2k-ok]
+[ne2k:mac=525400123456]                ← real PROM MAC
+TLSTEST: ifup True ip 10.0.2.15
+TLSTEST: tcp_connected
+```
+
+Pcap from QEMU shows the **full TCP 3-way handshake** completing on
+the wire:
+
+```
+ARP, Announcement 10.0.2.15
+ARP, Request who-has 10.0.2.2
+ARP, Reply 10.0.2.2 is-at 52:55:0a:00:02:02
+IP 10.0.2.15.61672 > 10.0.2.2.8443: Flags [S], seq 6509
+IP 10.0.2.2.8443 > 10.0.2.15.61672: Flags [S.], seq 64001, ack 6510
+IP 10.0.2.15.61672 > 10.0.2.2.8443: Flags [.], ack 1
+```
+
+The TLS server logs `connection from ('127.0.0.1', 56684)` — confirming
+our handshake reached it correctly.
+
+### Critical gotcha: socket connect must be blocking from the start
+
+The TLS rig originally used `s.setblocking(False); s.connect(addr); ...
+poll loop ...; s.setblocking(True); s.connect(addr)`. That hangs forever
+because:
+- Non-blocking connect returns EINPROGRESS (state=STATE_CONNECTING)
+- The script's poll loop pumps RX, `_lwip_tcp_connected` fires, state
+  becomes STATE_CONNECTED
+- Second connect rejects with `MP_EALREADY` because the state-check
+  in `lwip_socket_connect` is `if (state != STATE_NEW)` *before* the
+  wait-for-state-change loop
+
+Fix: just call blocking `s.connect(addr)` from the start. lwIP's
+internal wait loop pumps via `MICROPY_PY_LWIP_POLL_HOOK` (which we
+define in `mpconfigport.h` to call `uc386dos_loopback_poll`), and the
+SYN-ACK gets delivered before connect returns success.
+
+### What's still broken (next session)
+
+1. **`f.read()` on `TESTCA.PEM` hangs after network init.** Plain DOS
+   file ops (INT 21h AH=0x3F) work fine standalone, but after the
+   PM-native NE2000 driver is up and a TCP connection is in flight,
+   `open()` succeeds and then `read()` never returns.
+
+2. **`ssl.SSLContext.wrap_socket(s)` hangs before sending ClientHello.**
+   No additional packets in pcap. Could be axtls's RNG init waiting
+   on a PRNG source we don't provide, or a busy-loop in `tls_handshake`
+   that needs `MICROPY_PY_LWIP_POLL_HOOK` from a different call site.
+
+Both bugs are sitting at the MicroPython-port glue layer, not the
+driver. The driver is now fully functional. The "shape" of both bugs
+is "long-running work hangs even though prerequisites work in
+isolation," which suggests possible IRQ/PIC interference (we set
+NE2000's IMR=0 but didn't mask IRQ 9 at the 8259 PIC, so the NIC
+might still be raising the line on bus events).
+
+### Files of interest in the next debug session
+
+- `src/freedos_micro_python/port/pktdrv_uc386dos.c` — PM-native NE2000
+  driver (look for `// PM-native NE2000 driver` banner) plus the
+  retained Crynwr/thunk path (now dead). Also has many `_diag_hex32`
+  call sites that can be re-enabled to instrument calls.
+- `src/freedos_micro_python/port/lwip_uc386dos.c` —
+  `uc386dos_eth_pump_rx` which is the inner RX loop fed by lwIP's
+  poll hook.
+- `rigs/tls-rig/run-tls-rig.sh` — autoexec no longer loads NE2000.COM.
+- `rigs/tls-rig/TLSTEST.PY` — uses blocking connect, currently halts
+  at `wrap_socket(s)`.
+- `/tmp/fmp_pypi_build/upstream/ports/minimal/main.c` — has the
+  bounce-buffer + thunk pre-alloc patches applied directly. Future
+  work: move this into a `patch_main_pktdrv_prealloc()` hook in
+  `scripts/fetch.sh` so it's re-applied on every fresh fetch.

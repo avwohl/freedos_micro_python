@@ -233,12 +233,8 @@ int uc386dos_eth_driver(void) {
 // virtual-eth RX queue so DHCP responses + ARP replies land.
 void uc386dos_loopback_poll(void *arg) {
     (void)arg;
-    extern int write(int fd, const void *buf, unsigned int n);
-    write(1, "[lp:np]", 7);
     netif_poll_all();
-    write(1, "[lp:rx]", 7);
     uc386dos_eth_pump_rx();
-    write(1, "[lp:done]", 9);
 }
 
 // Expose `mp_module_lwip` as `socket` too. modlwip.c registers
