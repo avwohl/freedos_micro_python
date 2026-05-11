@@ -1,14 +1,24 @@
 #!/usr/bin/env bash
 # Same bench as run.sh but loads CWSDPMI as the DPMI host BEFORE
-# DOS/32A starts. Per DOS/32A's docs, it can defer to an external
-# DPMI host. CWSDPMI is the gold-standard DPMI 0.9 implementation
-# used by DJGPP+Watt32 for decades; if our AH=04 send_pkt GPF goes
-# away under CWSDPMI, the bug is confirmed as DOS/32A-specific and
-# we have a clean alternative.
+# DOS/32A starts (via SET DOS32A=NOVCPI NOXMS). CWSDPMI is the
+# gold-standard DPMI 0.9 host used by DJGPP+Watt32 for decades.
 #
-# Pair with build using `NO_IRQ_MASK=1 ./build.sh` so the bench
-# doesn't mask the NIC IRQ — otherwise we can't tell whether
-# CWSDPMI or our mask is what kept it alive.
+# FINDING (kept as a documented alternative host, not a fix):
+#   - Default build (IRQ mask ON): bench PASSes end-to-end under
+#     CWSDPMI — 5/5 sends OK, reaches [bench:done]. Confirms our
+#     stack is portable across DPMI hosts.
+#   - NO_IRQ_MASK=1 build: reproduces the same AH=04 send_pkt
+#     GPF under CWSDPMI that we see on DOS/32A's native server.
+#     So the GPF is in the real-mode IRQ→PM transition (NIC IRQ
+#     firing during the RM send_pkt), not DOS/32A-specific.
+#     The IRQ-mask workaround in pktdrv_init is required either
+#     way; CWSDPMI does not sidestep it.
+#
+# Prereq: build.sh produced build/CRYN.EXE. The bridge stub
+# (uc386 addons/harness/exe.py) had its early-2024 diagnostic
+# dereferences stripped — those touched `[_main + N]` and PF'd
+# under CWSDPMI's stricter paging. See exe.py near the
+# `--- LE FIXUP / runtime addressing diagnostics ---` comment.
 set -eu
 
 cd "$(dirname "$0")"
