@@ -27,6 +27,22 @@
 #include "py/stream.h"
 #include "py/objstr.h"
 
+// ---- DPMI-thunked DOS file I/O (port/dosint21_uc386dos.c) ----------
+// libc's POSIX wrappers (open/read/write/close) call INT 21h directly
+// from PM. PMODE/W's translation for AH=0x3F hangs from deep stacks
+// (verified with the 30-line readsmoke.c standalone), which is fatal
+// for MicroPython since its interpreter naturally builds a deep C
+// stack before reaching user-level read() calls. We bypass that by
+// dispatching INT 21h through a real-mode thunk via DPMI fn 0x0301 —
+// same pattern that drives the Crynwr packet driver. The dos_int21_*
+// API in dosint21_uc386dos.c handles bounce-buffer copy in/out.
+extern int  dos_int21_open(const char *path, int dos_access_mode, int *err_out);
+extern int  dos_int21_read(int fd, void *buf, unsigned int count, int *err_out);
+extern int  dos_int21_write(int fd, const void *buf, unsigned int count, int *err_out);
+extern int  dos_int21_close(int fd, int *err_out);
+extern long dos_int21_lseek(int fd, long offset, int whence, int *err_out);
+extern long dos_int21_fsize(int fd);
+
 typedef struct _mp_obj_uc386dos_file_t {
     mp_obj_base_t base;
     int fd;  // -1 = closed
@@ -39,42 +55,47 @@ extern const mp_obj_type_t mp_type_uc386dos_fileio;
 // to the str-len lexer. Used by `import xxx` to load `xxx.py`.
 mp_lexer_t *mp_lexer_new_from_file(qstr filename) {
     const char *fname = qstr_str(filename);
-    int fd = open(fname, O_RDONLY);
+    int err = 0;
+    int fd = dos_int21_open(fname, 0 /* DOS read-only */, &err);
     if (fd < 0) {
         mp_raise_OSError(MP_ENOENT);
     }
-    // Stat to get the file size. Avoids a grow-the-buffer loop.
-    struct stat st;
-    if (fstat(fd, &st) < 0) {
-        close(fd);
+    long fsize = dos_int21_fsize(fd);
+    if (fsize < 0) {
+        dos_int21_close(fd, &err);
         mp_raise_OSError(MP_EIO);
     }
-    size_t size = (size_t)st.st_size;
+    size_t size = (size_t)fsize;
     char *buf = m_new(char, size + 1);
     size_t got = 0;
     while (got < size) {
-        int n = read(fd, buf + got, size - got);
+        unsigned int want = (unsigned int)(size - got);
+        int n = dos_int21_read(fd, buf + got, want, &err);
         if (n <= 0) {
             break;
         }
         got += (size_t)n;
     }
-    close(fd);
+    dos_int21_close(fd, &err);
     buf[got] = '\0';
     return mp_lexer_new_from_str_len(filename, buf, got, 0);
 }
 
 // `mp_import_stat` — does `path` resolve to a file, dir, or
 // nothing? `import xxx` walks `sys.path` calling this for each
-// candidate path.
+// candidate path. We synthesise "does the file exist" by trying to
+// open it for read; success → FILE, failure → NO_EXIST. We don't
+// distinguish dirs because DOS's directory-stat path (AH=0x4E find-
+// first) is a heavier dance and MicroPython only uses STAT_DIR to
+// say "this is a package init" — for our flat floppy/HDD layouts
+// every .py is a file.
 mp_import_stat_t mp_import_stat(const char *path) {
-    struct stat st;
-    if (stat(path, &st) != 0) {
+    int err = 0;
+    int fd = dos_int21_open(path, 0, &err);
+    if (fd < 0) {
         return MP_IMPORT_STAT_NO_EXIST;
     }
-    if (S_ISDIR(st.st_mode)) {
-        return MP_IMPORT_STAT_DIR;
-    }
+    dos_int21_close(fd, &err);
     return MP_IMPORT_STAT_FILE;
 }
 
@@ -93,12 +114,23 @@ static mp_uint_t uc386dos_file_read(mp_obj_t o_in, void *buf, mp_uint_t size,
         *errcode = MP_EBADF;
         return MP_STREAM_ERROR;
     }
-    int r = read(o->fd, buf, size);
-    if (r < 0) {
-        *errcode = MP_EIO;
-        return MP_STREAM_ERROR;
+    // Loop so a >1024-byte request can be served from the bounce buffer
+    // chunk by chunk (dos_int21_read clamps each call to 1 KB to leave
+    // room for the path scratch at the start of the 2 KB bounce).
+    mp_uint_t total = 0;
+    unsigned char *p = (unsigned char *)buf;
+    while (total < size) {
+        unsigned int want = (unsigned int)(size - total);
+        int err = 0;
+        int n = dos_int21_read(o->fd, p + total, want, &err);
+        if (n < 0) {
+            *errcode = MP_EIO;
+            return MP_STREAM_ERROR;
+        }
+        if (n == 0) break;       // EOF
+        total += (mp_uint_t)n;
     }
-    return (mp_uint_t)r;
+    return total;
 }
 
 static mp_uint_t uc386dos_file_write(mp_obj_t o_in, const void *buf,
@@ -108,12 +140,20 @@ static mp_uint_t uc386dos_file_write(mp_obj_t o_in, const void *buf,
         *errcode = MP_EBADF;
         return MP_STREAM_ERROR;
     }
-    int r = write(o->fd, buf, size);
-    if (r < 0) {
-        *errcode = MP_EIO;
-        return MP_STREAM_ERROR;
+    mp_uint_t total = 0;
+    const unsigned char *p = (const unsigned char *)buf;
+    while (total < size) {
+        unsigned int want = (unsigned int)(size - total);
+        int err = 0;
+        int n = dos_int21_write(o->fd, p + total, want, &err);
+        if (n < 0) {
+            *errcode = MP_EIO;
+            return MP_STREAM_ERROR;
+        }
+        if (n == 0) break;       // disk full or similar
+        total += (mp_uint_t)n;
     }
-    return (mp_uint_t)r;
+    return total;
 }
 
 static mp_uint_t uc386dos_file_ioctl(mp_obj_t o_in, mp_uint_t request,
@@ -125,10 +165,10 @@ static mp_uint_t uc386dos_file_ioctl(mp_obj_t o_in, mp_uint_t request,
             *errcode = MP_EBADF;
             return MP_STREAM_ERROR;
         }
-        int whence = (s->whence == 0) ? SEEK_SET
-                   : (s->whence == 1) ? SEEK_CUR
-                                      : SEEK_END;
-        long pos = lseek(o->fd, (long)s->offset, whence);
+        // mp whence: 0=SEEK_SET, 1=SEEK_CUR, 2=SEEK_END — same numeric
+        // values DOS AH=0x42 uses, so no remap needed.
+        int err = 0;
+        long pos = dos_int21_lseek(o->fd, (long)s->offset, s->whence, &err);
         if (pos < 0) {
             *errcode = MP_EIO;
             return MP_STREAM_ERROR;
@@ -142,7 +182,8 @@ static mp_uint_t uc386dos_file_ioctl(mp_obj_t o_in, mp_uint_t request,
     }
     if (request == MP_STREAM_CLOSE) {
         if (o->fd >= 0) {
-            close(o->fd);
+            int err = 0;
+            dos_int21_close(o->fd, &err);
             o->fd = -1;
         }
         return 0;
@@ -204,20 +245,29 @@ static mp_obj_t uc386dos_builtin_open(size_t n_args, const mp_obj_t *args,
     if (n_args >= 2) {
         mode_s = mp_obj_str_get_str(args[1]);
     }
-    int mode_rw = O_RDONLY;
-    int mode_x = 0;
+    // DOS AH=0x3D access mode: 0=read, 1=write, 2=read-write. We
+    // don't yet support 'w' (truncate-create) or 'a' (append-create)
+    // through the thunk; those require AH=0x3C (create) or AH=0x6C
+    // (extended open w/ truncate). Plumb in a later cycle. For now
+    // map them to the closest read-write mode and rely on the open
+    // failing if the file doesn't already exist.
+    int dos_mode = 0;
+    int want_create = 0;
+    int want_trunc  = 0;
     const mp_obj_type_t *type = &mp_type_uc386dos_textio;
     while (*mode_s) {
         switch (*mode_s++) {
-            case 'r': mode_rw = O_RDONLY; break;
-            case 'w': mode_rw = O_WRONLY; mode_x = O_CREAT | O_TRUNC; break;
-            case 'a': mode_rw = O_WRONLY; mode_x = O_CREAT | O_APPEND; break;
-            case '+': mode_rw = O_RDWR; break;
+            case 'r': dos_mode = 0; break;
+            case 'w': dos_mode = 1; want_create = 1; want_trunc = 1; break;
+            case 'a': dos_mode = 1; want_create = 1; break;
+            case '+': dos_mode = 2; break;
             case 'b': type = &mp_type_uc386dos_fileio; break;
             case 't': type = &mp_type_uc386dos_textio; break;
         }
     }
-    int fd = open(fname, mode_rw | mode_x, 0644);
+    (void)want_create; (void)want_trunc;     // TODO: AH=0x3C for create
+    int err = 0;
+    int fd = dos_int21_open(fname, dos_mode, &err);
     if (fd < 0) {
         mp_raise_OSError(MP_ENOENT);
     }

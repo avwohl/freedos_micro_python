@@ -199,6 +199,7 @@ SOURCES_FILE="build/_port_sources.txt"
     echo uc386-dos/urllib_uc386dos.c
     echo uc386-dos/uc386_net_uc386dos.c
     echo uc386-dos/pktdrv_uc386dos.c
+    echo uc386-dos/dosint21_uc386dos.c
     echo uc386-dos/math_gamma.c
     # Real time(), mktime(), gettimeofday() backed by the DOS RTC —
     # replaces the libc.asm stubs (now removed). Required by axtls

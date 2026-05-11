@@ -9,3 +9,10 @@ dist/
 # Build artifacts (the compiled MicroPython binary lands here)
 src/freedos_micro_python/build/
 src/freedos_micro_python/upstream/
+
+# pyle (addons.harness.exe) leaves these alongside the .exe — they're
+# the intermediate .obj/.asm files that aren't worth tracking.
+rigs/dosbox-x-rig/MP.bridge.asm
+rigs/dosbox-x-rig/MP.bridge.obj
+rigs/dosbox-x-rig/MP.obj
+rigs/dosbox-x-rig/MP.omf.asm

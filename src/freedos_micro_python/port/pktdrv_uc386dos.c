@@ -232,6 +232,20 @@ static int ne2k_init_direct(unsigned char mac[6]) {
     ne2k_outb(NE2K_BASE + NE_RCR, 0x04);   // Accept broadcast (and own-MAC unicast implicit)
 
     ne2k_initialized = 1;
+
+    // Belt-and-suspenders: mask IRQ 9 at the slave 8259 PIC. The
+    // chip's NE_IMR is already 0 (above) so it shouldn't assert IRQ,
+    // but a stuck-high line during reset could still latch into the
+    // slave PIC and fire whatever stale ISR is registered for IRQ 9 —
+    // and since we don't install one, the BIOS default is unpredictable
+    // (suspected source of f.read() hangs after eth_init: INT 21h
+    // AH=0x3F starts a sector read, the floppy's IRQ 6 handling races
+    // with a phantom IRQ 9, and the read never completes). IRQ 9 is
+    // bit 1 of the slave PIC IMR at port 0xA1.
+    write(1, "[ne2k:pic-mask]", 15);
+    unsigned int slave_imr = ne2k_inb(0xA1);
+    ne2k_outb(0xA1, slave_imr | 0x02);
+
     write(1, "[ne2k:ready]", 12);
     return 0;
 }

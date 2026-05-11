@@ -9,3 +9,6 @@ qemu-tls-*.log
 tls-out.txt
 tls-server.log
 tlstest-wrapped.in
+freedos-read.img
+qemu-read.log
+readtest-wrapped.in
