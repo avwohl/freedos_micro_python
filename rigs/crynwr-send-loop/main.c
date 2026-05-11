@@ -32,6 +32,9 @@ extern int  write(int fd, const void *buf, unsigned int n);
 extern int  pktdrv_init(unsigned char mac[6]);
 extern int  pktdrv_send(const unsigned char *buf, unsigned int len);
 extern int  pktdrv_is_active(void);
+extern volatile unsigned int pktdrv_thunk_invocations;
+extern volatile unsigned int pktdrv_thunk_phase0_count;
+extern volatile unsigned int pktdrv_thunk_phase1_count;
 
 /* Pre-allocation symbols read by pktdrv_alloc_bounce / _thunk in
  * pktdrv_uc386dos.c (same shape as tls-smoke main.c). PMODE/W's
@@ -211,6 +214,14 @@ int main(void) {
      * specifically (lwIP timer pump, axtls init, interim INT 21h
      * activity) rather than by adjacent pktdrv_send calls. */
     for (int i = 0; i < 5; i++) {
+        /* RX-callback diagnostics: if pktdrv_thunk_invocations > 0
+         * here, the DPMI 0x0303 PM callback has fired since the
+         * last iteration — useful for the "RX IRQ corrupts state
+         * during send" hypothesis. */
+        emit("[send ");
+        emit_dec((unsigned int)i);
+        emit(" thunk-inv=]");
+        emit_hex8(pktdrv_thunk_invocations);
         emit("[send ");
         emit_dec((unsigned int)i);
         emit(" pre]\r\n");
