@@ -836,20 +836,29 @@ unsigned char *uc386dos_pktdrv_receiver(int phase, unsigned int len) {
     return NULL;
 }
 
-// DPMI fn 0x0303 callback target — the 32-bit handler the DPMI
-// host invokes when the real-mode trampoline fires. On entry:
-//   DS:ESI = ES:EDI = pointer to our pktdrv_rmcs (DPMI fills it
-//   from the saved real-mode register frame).
-// Crynwr's calling convention puts phase in AX and length in CX,
-// expects ES:DI = buffer on phase=0 return. We translate from
-// the RMCS, drive the existing receiver, and write the buffer's
-// real-mode seg:offset back into RMCS so DPMI can hand it to
-// real mode on its way out.
+// DPMI fn 0x0303 callback worker — the 32-bit handler the DPMI
+// host invokes (via the IRETD-terminated `_uc386dos_pktdrv_dpmi_
+// thunk` stub in i386_dos_libc.asm) when the real-mode trampoline
+// fires. On entry to the stub:
+//   DS:ESI = pointer to saved real-mode SS:SP
+//   ES:EDI = pointer to our pktdrv_rmcs (DPMI fills it from the
+//   saved real-mode register frame)
+// The stub reloads DS/ES to our flat data selector before calling
+// in here, so global accesses (`pktdrv_rmcs`, etc.) work normally.
 //
-// Cdecl signature so we can call it directly under emulation as
-// well — dos_emu's DPMI fn 0x0303 emulation invokes this through
-// the same path. (No-op under hardware DPMI; the host calls it.)
-void uc386dos_pktdrv_dpmi_thunk(void) {
+// Crynwr's calling convention puts phase in AX and length in CX,
+// expects ES:DI = buffer on phase=0 return. We translate from the
+// RMCS, drive the existing receiver, and write the buffer's real-
+// mode seg:offset back into RMCS so DPMI can hand it to real mode
+// on its way out (the stub leaves the RMCS in place).
+//
+// The asm stub does IRETD, not RET — DPMI 0.9 fn 0x0303 invokes
+// the PM handler via FAR CALL with EFLAGS underneath CS:EIP, and a
+// near-return desyncs the host's stack (which presents as a GPF on
+// the NEXT DPMI dispatch, not this one — so the bug looked like
+// "second send crashes" instead of "first callback corrupts
+// state"). The C function itself stays a normal cdecl void(void).
+void uc386dos_pktdrv_dpmi_thunk_c(void) {
     // Bump the invocation counter ASAP — IRQ context, can't safely
     // call DOS for write(); the counter is what Python polls.
     pktdrv_thunk_invocations++;
@@ -881,7 +890,23 @@ void uc386dos_pktdrv_dpmi_thunk(void) {
 // and we leave pktdrv_dpmi_{seg,off} at 0; pktdrv_init then falls
 // back to passing the flat receiver address to access_type, which
 // works under dos_emu (with AH=0x99 polling) but not on real DOS.
+// IRETD wrapper in lib/i386_dos_libc.asm. Registers as a DPMI 0.9
+// fn 0x0303 PM callback; on RX it calls uc386dos_pktdrv_dpmi_thunk_c
+// above and then IRETDs (the host's required return convention).
+extern void uc386dos_pktdrv_dpmi_thunk(void);
+
+// Anchor: uc386's asm DCE walks references in the emitted .asm only,
+// not in the appended libc.asm — so the `extern _uc386dos_pktdrv_
+// dpmi_thunk_c` declared by the IRETD wrapper is invisible to it,
+// and DCE would prune the C function as unreachable. Taking the
+// address here (in a reachable function) makes the symbol show up
+// in this function's emitted asm and keeps it live through DCE.
+// The value is discarded; the side-effect is purely the reference.
+static volatile unsigned int _pktdrv_dpmi_thunk_c_anchor;
+
 static int pktdrv_alloc_dpmi_callback(void) {
+    _pktdrv_dpmi_thunk_c_anchor =
+        (unsigned int)(unsigned long)&uc386dos_pktdrv_dpmi_thunk_c;
     unsigned int regs[8] = {0};
     regs[R_EAX] = 0x0303;
     regs[R_ESI] = (unsigned int)(unsigned long)
@@ -932,7 +957,11 @@ static void pktdrv_register_polling_rx(void) {
 int pktdrv_init(unsigned char mac[6]) {
     extern int write(int fd, const void *buf, unsigned int n);
     write(1, "[pi:enter]", 10);
-    // PM-native NE2000 path: skip Crynwr entirely.
+#ifndef PKTDRV_FORCE_CRYNWR
+    // PM-native NE2000 path: skip Crynwr entirely. Built-in unless
+    // -DPKTDRV_FORCE_CRYNWR=1 is set, in which case we fall straight
+    // through to the standard mTCP / htget-style Crynwr+DPMI 0x0303
+    // path (any NIC with a real-DOS packet driver, not just NE2000).
     if (ne2k_init_direct(mac) == 0) {
         write(1, "[pi:ne2k-ok]", 12);
         // Mark int_num as a sentinel so pktdrv_send takes the
@@ -949,6 +978,9 @@ int pktdrv_init(unsigned char mac[6]) {
         return 0;
     }
     write(1, "[pi:ne2k-fail-fallback-crynwr]", 30);
+#else
+    write(1, "[pi:force-crynwr]", 17);
+#endif
     if (pktdrv_detect() == 0) {
         write(1, "[pi:no-driver]", 14);
         return -1;

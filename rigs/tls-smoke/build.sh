@@ -126,6 +126,16 @@ SOURCES_FILE=build/_sources.txt
 N=$(wc -l < "$SOURCES_FILE" | tr -d ' ')
 echo "tls_smoke: compiling $N sources via uc386 …"
 
+# FORCE_CRYNWR=1 ./build.sh skips the PM-native NE2000 path and
+# routes through the standard Crynwr-packet-driver + DPMI 0x0303
+# flow — the path mTCP / htget use on FreeDOS. Lets us prove the
+# port works against any NIC with a Crynwr driver, not just
+# NE2000-at-0x300.
+EXTRA_DEFS=""
+if [ "${FORCE_CRYNWR:-0}" = "1" ]; then
+    EXTRA_DEFS="$EXTRA_DEFS -DPKTDRV_FORCE_CRYNWR=1"
+fi
+
 tr '\n' '\0' < "$SOURCES_FILE" \
     | xargs -0 "$FMP_PY" -m uc386.main \
         -I "$UC386_LIB_INCLUDE" \
@@ -143,6 +153,7 @@ tr '\n' '\0' < "$SOURCES_FILE" \
         -DMICROPY_SSL_AXTLS=1 \
         -DMICROPY_PY_SSL=1 \
         -Dmp_stream_errno=errno \
+        $EXTRA_DEFS \
         -o build/tls_smoke.asm
 echo "tls_smoke: wrote build/tls_smoke.asm ($(wc -c < build/tls_smoke.asm | tr -d ' ') bytes)"
 

@@ -10,3 +10,7 @@ tls-server.log
 # RIG.LOG via the autoexec redirect.
 TLS.EXE
 RIG.LOG
+# run-crynwr.sh artifacts (FreeDOS image + QEMU log + pcap).
+freedos-tls-crynwr.img
+qemu-tls-crynwr.log
+qemu-tls-crynwr.pcap
