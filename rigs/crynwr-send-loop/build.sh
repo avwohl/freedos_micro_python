@@ -23,6 +23,15 @@ UC386_LIB_INCLUDE=$("$FMP_PY" -c \
 
 mkdir -p build
 
+# NO_IRQ_MASK=1 ./build.sh disables the DOS/32A IRQ-mask workaround
+# in pktdrv_init so the bench reproduces the original GPF. Used to
+# isolate whether a host swap (e.g. CWSDPMI) is what's keeping the
+# send path alive, vs. our workaround.
+EXTRA_DEFS=""
+if [ "${NO_IRQ_MASK:-0}" = "1" ]; then
+    EXTRA_DEFS="$EXTRA_DEFS -DPKTDRV_NO_IRQ_MASK_WORKAROUND=1"
+fi
+
 echo "crynwr_send_loop: compiling via uc386 ..."
 "$FMP_PY" -m uc386.main \
     -I "$UC386_LIB_INCLUDE" \
@@ -30,6 +39,7 @@ echo "crynwr_send_loop: compiling via uc386 ..."
     -D__linux__=1 \
     -DNDEBUG=1 \
     -DPKTDRV_FORCE_CRYNWR=1 \
+    $EXTRA_DEFS \
     "$PORT"/pktdrv_uc386dos.c \
     ./main.c \
     -o build/crynwr_send_loop.asm

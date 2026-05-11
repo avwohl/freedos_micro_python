@@ -1107,23 +1107,14 @@ int pktdrv_init(unsigned char mac[6]) {
         write(1, buf, 26);
     }
     pktdrv_register_polling_rx();
-    /* DOS/32A workaround: AH=04 send_pkt GPFs deterministically
-     * inside DOS/32A's RM→PM transition when an IRQ fires during
-     * the packet driver's send (NE2000 IRQ 9, PCnet IRQ 11 both
-     * exhibit it under QEMU). Mask slave-PIC IRQs 9 and 11 at the
-     * 8259 once here, after Crynwr finishes its init — the previous
-     * IMR (Crynwr-default 0x86 on this hardware = IRQ 9 already
-     * masked) doesn't cover IRQ 11 alone, so adding bits is what
-     * keeps DOS/32A happy. Cost: Crynwr's IRQ-driven RX path is
-     * disabled, so RX has to be drained another way (the existing
-     * AH=99 polling fallback). Repro / details: rigs/crynwr-send-
-     * loop and its commit message.
-     *
-     * Reused from the PM-native NE2000 driver below: ne2k_outb /
-     * ne2k_inb are generic PM IO helpers, not NE2000-specific. */
+#if !defined(PKTDRV_NO_IRQ_MASK_WORKAROUND)
+    /* DOS/32A workaround: see comment block. Disable for the
+     * cwsdpmi-host experiment via -DPKTDRV_NO_IRQ_MASK_WORKAROUND=1
+     * to test whether the bug also reproduces under CWSDPMI. */
     extern void         ne2k_outb(unsigned int port, unsigned int val);
     extern unsigned int ne2k_inb(unsigned int port);
     ne2k_outb(0xA1, ne2k_inb(0xA1) | 0x0A);
+#endif
     write(1, "[pi:done]", 9);
     return 0;
 }
