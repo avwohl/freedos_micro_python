@@ -1107,9 +1107,31 @@ int pktdrv_init(unsigned char mac[6]) {
         write(1, buf, 26);
     }
     pktdrv_register_polling_rx();
+    /* DOS/32A workaround: AH=04 send_pkt GPFs deterministically
+     * inside DOS/32A's RM→PM transition when an IRQ fires during
+     * the packet driver's send (NE2000 IRQ 9, PCnet IRQ 11 both
+     * exhibit it under QEMU). Mask slave-PIC IRQs 9 and 11 at the
+     * 8259 once here, after Crynwr finishes its init — the previous
+     * IMR (Crynwr-default 0x86 on this hardware = IRQ 9 already
+     * masked) doesn't cover IRQ 11 alone, so adding bits is what
+     * keeps DOS/32A happy. Cost: Crynwr's IRQ-driven RX path is
+     * disabled, so RX has to be drained another way (the existing
+     * AH=99 polling fallback). Repro / details: rigs/crynwr-send-
+     * loop and its commit message.
+     *
+     * Reused from the PM-native NE2000 driver below: ne2k_outb /
+     * ne2k_inb are generic PM IO helpers, not NE2000-specific. */
+    extern void         ne2k_outb(unsigned int port, unsigned int val);
+    extern unsigned int ne2k_inb(unsigned int port);
+    ne2k_outb(0xA1, ne2k_inb(0xA1) | 0x0A);
     write(1, "[pi:done]", 9);
     return 0;
 }
+
+/* PM-side IO port helpers (PMODE/W and DOS/32A both grant flat PM
+ * apps full IO permission by default). Reused from the NE2000 path. */
+extern void         ne2k_outb(unsigned int port, unsigned int val);
+extern unsigned int ne2k_inb(unsigned int port);
 
 // AH=0x04 send_pkt — transmit a frame. The packet driver expects
 // DS:SI to point at real-mode-addressable memory; copy `buf` into
@@ -1118,6 +1140,16 @@ int pktdrv_init(unsigned char mac[6]) {
 // Without a bounce buffer (early init or DPMI failure) we fall back
 // to the bare-INT path with a flat-linear DS:SI value — dos_emu's
 // AH=04 hook handles that, real DOS doesn't.
+//
+// IRQ workaround: DOS/32A's RM→PM transition for the AH=04 send_pkt
+// path GPFs deterministically when an IRQ fires during the real-
+// mode send. The crash is reproduced cleanly in rigs/crynwr-send-
+// loop and is symmetric across NE2000.COM (IRQ 9) and PCNTPK.COM
+// (IRQ 11) — i.e., it's NOT driver-specific, it's a DOS/32A bug.
+// Workaround: mask all slave-PIC IRQs (8-15) across the DPMI call
+// and restore on return. Brief masking window; any RX packets are
+// queued in the NIC's onboard buffer and delivered when Crynwr's
+// handler runs after the unmask.
 int pktdrv_send(const unsigned char *buf, unsigned int len) {
     extern int write(int fd, const void *buf, unsigned int n);
     // PM-native NE2000 path

@@ -36,6 +36,11 @@ extern volatile unsigned int pktdrv_thunk_invocations;
 extern volatile unsigned int pktdrv_thunk_phase0_count;
 extern volatile unsigned int pktdrv_thunk_phase1_count;
 
+/* 8259 PIC IO helpers (from uc386 libc — same path the PM-native
+ * NE2000 driver uses for direct IO). */
+extern void         ne2k_outb(unsigned int port, unsigned int val);
+extern unsigned int ne2k_inb(unsigned int port);
+
 /* Pre-allocation symbols read by pktdrv_alloc_bounce / _thunk in
  * pktdrv_uc386dos.c (same shape as tls-smoke main.c). PMODE/W's
  * DOS-alloc hangs from deep stack, so we pre-alloc from main()
@@ -213,6 +218,10 @@ int main(void) {
      * tls-smoke crash was triggered by something the smoke does
      * specifically (lwIP timer pump, axtls init, interim INT 21h
      * activity) rather than by adjacent pktdrv_send calls. */
+    /* IRQ masking now happens inside pktdrv_init at the end of the
+     * Crynwr setup phase — see the comment there for the bug and
+     * the cost. This bench can call pktdrv_send as-is. */
+
     for (int i = 0; i < 5; i++) {
         /* RX-callback diagnostics: if pktdrv_thunk_invocations > 0
          * here, the DPMI 0x0303 PM callback has fired since the
