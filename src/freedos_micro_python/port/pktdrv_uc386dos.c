@@ -743,8 +743,16 @@ static int pktdrv_access(unsigned int linear_receiver) {
     }
     static pktdrv_rmcs_t rm;
     rm.edi = linear_receiver & 0xFFFF;     // offset (receiver real-mode IP)
-    // DS:SI = real-mode pointer to type bytes (thunk paragraph, off 4 = ARP).
-    rm.esi = 4;                             // ARP type pattern at thunk[4..5]
+    // DS:SI = real-mode pointer to type bytes (thunk paragraph, off 6 = IPv4).
+    // We register the IPv4 ethertype (0x0800) rather than ARP (0x0806)
+    // because DHCP OFFER replies come back as UDP/IP -- the slirp/qemu
+    // DHCP server doesn't need to ARP us first, it sends OFFER straight
+    // to the broadcast.  ARP-only registration silently drops every
+    // DHCP reply.  ARP can be added as a second access_type handle if
+    // we ever need to reach hosts on a non-trivial L2 (none of our
+    // smoke targets do; slirp/SLIRP both bridge IP without exposing
+    // their gateway MAC).
+    rm.esi = 6;                             // IPv4 type pattern at thunk[6..7]
     rm.ebp = 0; rm.reserved = 0;
     rm.ebx = 0xFFFF;                        // if_type=0xFFFF (any/wildcard)
     rm.edx = 0;                             // if_number=0 (first card)
@@ -931,36 +939,51 @@ static int pktdrv_alloc_dpmi_callback(void) {
 // number while still delivering RX frames. Real DOS Crynwr drivers
 // don't implement AH=0x99; pktdrv_recv simply returns 0 there until
 // the DPMI trampoline replaces this.
+// AH=0x99 (uc386dos/dosiz extension): hand the harness pointers to
+// pktdrv_rx_buf / pktdrv_rx_len / pktdrv_rx_pending so it can post
+// inbound frames directly without going through the receiver-callback
+// dance.  Real-DOS Crynwr drivers (NE2000.COM etc.) don't implement
+// this; thunked AH=99 against NE2000.COM v11.4.3 leaves DOS/32A's PM
+// scratch state subtly corrupted (INT 0x0D #GP on the next INT 0x1A).
+// Probe via a thunked AH=01 driver_info first and only issue AH=99
+// when the driver returns dosiz's distinguishing version marker.
+// On dos_emu the bare-INT path bypasses the probe (thunk_seg == 0).
 static void pktdrv_register_polling_rx(void) {
-    // Try the real-mode-thunk path first (DPMI fn 0x0301 -> INT 0x60
-    // through the CD 60 CB stub).  Under dosiz that's the path that
-    // actually reaches the virtual Crynwr handler -- a bare INT 0x60
-    // from PM bypasses dosiz's INT 0x60 IDT gate for reasons we don't
-    // fully understand yet (the gate is installed, CPL=0, gate DPL=3,
-    // target CS DPL=0; still nothing fires).  The same DPMI path is
-    // what AH=02 / 06 / 14 / 04 already use successfully here, so
-    // staying on it keeps AH=99 consistent.
-    if (pktdrv_thunk_seg != 0) {
-        static pktdrv_rmcs_t rm;
-        rm.edi = (unsigned int)(unsigned long)pktdrv_rx_buf;
-        rm.esi = (unsigned int)(unsigned long)&pktdrv_rx_pending;
-        rm.ecx = (unsigned int)(unsigned long)&pktdrv_rx_len;
-        rm.ebx = 0; rm.edx = 0; rm.ebp = 0; rm.reserved = 0;
-        rm.eax = 0x9900;
-        rm.flags = 0;
-        rm.es = 0; rm.ds = 0; rm.fs = 0; rm.gs = 0;
-        rm.ip = 0; rm.cs = 0; rm.sp = 0; rm.ss = 0;
-        (void)pktdrv_call_int60_thunk(&rm);
+    if (pktdrv_thunk_seg == 0) {
+        unsigned int regs[8] = {0};
+        regs[R_EAX] = 0x9900;
+        regs[R_EDI] = (unsigned int)(unsigned long)pktdrv_rx_buf;
+        regs[R_ESI] = (unsigned int)(unsigned long)&pktdrv_rx_pending;
+        regs[R_ECX] = (unsigned int)(unsigned long)&pktdrv_rx_len;
+        (void)pktdrv_int_invoke((unsigned int)pktdrv_int_num, regs);
         return;
     }
-    // Fallback: bare INT (dos_emu intercepts at the prot-mode INT
-    // level, so this works there even without the thunk).
-    unsigned int regs[8] = {0};
-    regs[R_EAX] = 0x9900;
-    regs[R_EDI] = (unsigned int)(unsigned long)pktdrv_rx_buf;
-    regs[R_ESI] = (unsigned int)(unsigned long)&pktdrv_rx_pending;
-    regs[R_ECX] = (unsigned int)(unsigned long)&pktdrv_rx_len;
-    (void)pktdrv_int_invoke((unsigned int)pktdrv_int_num, regs);
+    // dosiz's dosiz_int60 AH=01 sets ecx_low=0x0202.  Real Crynwr
+    // drivers return a 1.x BX version (and CX is basic+extended bits,
+    // not the same value).
+    static pktdrv_rmcs_t info;
+    info.edi = 0; info.esi = 0; info.ebp = 0; info.reserved = 0;
+    info.ebx = 0xFFFF; info.edx = 0; info.ecx = 0;
+    info.eax = 0x0100;
+    info.flags = 0;
+    info.es = 0; info.ds = 0; info.fs = 0; info.gs = 0;
+    info.ip = 0; info.cs = 0; info.sp = 0; info.ss = 0;
+    if (pktdrv_call_int60_thunk(&info) != 0 || (info.flags & 1)) {
+        return;
+    }
+    if ((info.ecx & 0xFFFF) != 0x0202) {
+        return;   // not dosiz; let DPMI 0x0303 callback handle RX
+    }
+    static pktdrv_rmcs_t rm;
+    rm.edi = (unsigned int)(unsigned long)pktdrv_rx_buf;
+    rm.esi = (unsigned int)(unsigned long)&pktdrv_rx_pending;
+    rm.ecx = (unsigned int)(unsigned long)&pktdrv_rx_len;
+    rm.ebx = 0; rm.edx = 0; rm.ebp = 0; rm.reserved = 0;
+    rm.eax = 0x9900;
+    rm.flags = 0;
+    rm.es = 0; rm.ds = 0; rm.fs = 0; rm.gs = 0;
+    rm.ip = 0; rm.cs = 0; rm.sp = 0; rm.ss = 0;
+    (void)pktdrv_call_int60_thunk(&rm);
 }
 
 // Public init: detect, register, fetch MAC. Returns 0 on success.
