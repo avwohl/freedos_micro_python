@@ -22,3 +22,4 @@ freedos-netbase.img
 qemu-netbase.log
 qemu-netbase.pcap
 netbase-wrapped.in
+dosiz-netbase.log
