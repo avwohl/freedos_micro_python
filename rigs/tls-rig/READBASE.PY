@@ -1,0 +1,11 @@
+import sys
+print('READBASE: start')
+print('READBASE: pre_open')
+f = open('TESTCA.PEM', 'rb')
+print('READBASE: post_open')
+print('READBASE: pre_read')
+data = f.read(1)
+print('READBASE: post_read len=', len(data))
+print('READBASE: first16=', data[:16])
+f.close()
+print('READBASE: PASS')

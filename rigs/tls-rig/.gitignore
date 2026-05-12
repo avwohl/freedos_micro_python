@@ -12,3 +12,9 @@ tlstest-wrapped.in
 freedos-read.img
 qemu-read.log
 readtest-wrapped.in
+freedos-readbase*.img
+qemu-readbase*.log
+readbase*-wrapped.in
+freedos-readsmoke.img
+qemu-readsmoke.log
+readsmoke-wrapped.in
