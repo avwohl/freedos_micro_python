@@ -18,3 +18,7 @@ readbase*-wrapped.in
 freedos-readsmoke.img
 qemu-readsmoke.log
 readsmoke-wrapped.in
+freedos-netbase.img
+qemu-netbase.log
+qemu-netbase.pcap
+netbase-wrapped.in

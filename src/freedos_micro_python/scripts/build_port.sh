@@ -251,6 +251,7 @@ tr '\n' '\0' < "$SOURCES_FILE" \
         -DNDEBUG=1 \
         -DMICROPY_SSL_AXTLS=1 \
         -DMICROPY_PY_SSL=1 \
+        -DPKTDRV_FORCE_CRYNWR=1 \
         -Dmp_stream_errno=errno \
         -o build/micropython.asm
 rc=$?
