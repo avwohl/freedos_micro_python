@@ -68,7 +68,7 @@ def micropython_bin() -> Path:
 def test_micropython_repl_banner(micropython_bin: Path) -> None:
     """MicroPython should boot far enough to print the REPL banner
     and the `>>> ` prompt, then wait on stdin."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               timeout_seconds=10.0,
@@ -96,7 +96,7 @@ def test_micropython_named_builtin(micropython_bin: Path) -> None:
     main-pool entries. Required: LC_ALL=C ASCII collation in the
     qstrdefs sort + real strlen in the QDEF length field. Result
     should print the module name `'__main__'`."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=b"__name__\n\x04",
@@ -118,7 +118,7 @@ def test_micropython_arithmetic(micropython_bin: Path) -> None:
     `_pass_push_memory_to_push_reg`, which was incorrectly merging
     chained pointer dereferences (`mov eax, [eax+4]; push [eax+4]`
     → `push eax`)."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=b"2+3\n\x04",
@@ -147,7 +147,7 @@ def test_micropython_assign_statement(micropython_bin: Path) -> None:
     Until commit 21dc0d9 this trapped in `qstr_find_strn`'s
     binary search because the empty-main-pool corner case
     underflowed the high-bound."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=b"x = 5\n\x04",
@@ -173,7 +173,7 @@ def test_micropython_pass_statement(micropython_bin: Path) -> None:
     after the REPL banner. Expression statements that produce a value
     (`1`, `print(2+3)`) currently fail in the value-print path —
     that's a separate gap, tracked in NOTES.md."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=b"pass\n\x04",
@@ -197,7 +197,7 @@ def test_micropython_clean_eof_exit(micropython_bin: Path) -> None:
     """Sending only Ctrl-D (EOF) at the prompt should exit the REPL
     cleanly with exit code 0 — exercises the readline → pyexec EOF
     path that runs after the boot banner."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=b"\x04",
@@ -224,7 +224,7 @@ def test_micropython_print_real_newline(micropython_bin: Path) -> None:
     newline. Fix: gen_qstrdefs.py reverses upstream's qstr_escape
     (re-using upstream's codepoint2name map) so escaped qstrs ship
     their original byte string in the QDEF1 payload."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=b"print(2+3)\n\x04",
@@ -251,7 +251,7 @@ def test_micropython_def_and_call(micropython_bin: Path) -> None:
     then `f(7)` → `14`. Pins compile of FunctionDef and the
     bytecode CALL_FUNCTION → MAKE_FUNCTION → arg binding → return
     path."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=b"def f(x): return x*2\n\nprint(f(7))\n\x04",
@@ -269,7 +269,7 @@ def test_micropython_list_comprehension(micropython_bin: Path) -> None:
     """`[i*i for i in range(5)]` exercises the comprehension scope
     + generator + range iter path, then prints the list. Pins
     objlist + objgenerator + objrange + the BUILD_LIST opcode."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=b"print([i*i for i in range(5)])\n\x04",
@@ -291,7 +291,7 @@ def test_micropython_bin_hex_oct(micropython_bin: Path) -> None:
     mangler must not split `_brace_open_` on the inner `_` and
     candidate-match `brace`. Pre-fix output was the macro-mangled
     text: `_brace_open_:#b_brace_close_` instead of `0b1010`."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=(
@@ -327,7 +327,7 @@ def test_micropython_enumerate_filter_property(micropython_bin: Path) -> None:
     MICROPY_PY_BUILTINS_ENUMERATE / FILTER / PROPERTY in
     mpconfigport.h, while staying at ROM_LEVEL_MINIMUM). Each pulls
     in self-contained .c that's already in the multi-TU compile."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=(
@@ -351,7 +351,7 @@ def test_micropython_enumerate_filter_property(micropython_bin: Path) -> None:
 def test_micropython_property_decorator(micropython_bin: Path) -> None:
     """`@property` decorator wraps an instance method as a read-only
     attribute. Pins the descriptor protocol + decorator dispatch."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(
         micropython_bin,
@@ -383,7 +383,7 @@ def test_micropython_min_max_reversed(micropython_bin: Path) -> None:
     Pinned because they're easy to lose: a future rebuild that
     forgets the opt-ins would silently lose `min`/`max`/`reversed`
     without breaking any other test."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=(
@@ -416,7 +416,7 @@ def test_micropython_try_except(micropython_bin: Path) -> None:
     matches the type, runs the handler. setjmp-backed NLR
     (MICROPY_NLR_SETJMP=1 in mpconfigport.h) is what makes this
     work — uc386 can't compile nlrx86.c's inline asm."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=b"try:\n    1/0\nexcept:\n    print('caught')\n\n\x04",
@@ -435,7 +435,7 @@ def test_micropython_core_features_bytearray(micropython_bin: Path) -> None:
     """`bytearray(b'abc')` is gated at CORE_FEATURES (default-off at
     MINIMUM via MICROPY_PY_BUILTINS_BYTEARRAY). Pins the type as
     runnable end-to-end on the uc386-built bin."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=b"print(bytearray(b'abc'))\n\x04",
@@ -454,7 +454,7 @@ def test_micropython_core_features_set(micropython_bin: Path) -> None:
     (MICROPY_PY_BUILTINS_SET). The dedup output `{1, 2, 3}` from
     `set([1,2,2,3])` proves objset.c's hash-based de-duplication is
     wired correctly across the multi-TU build."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=b"print(set([1,2,2,3]))\n\x04",
@@ -473,7 +473,7 @@ def test_micropython_core_features_named_error(micropython_bin: Path) -> None:
     the offending qstr name in NameError messages (vs MINIMUM's
     `name not defined` placeholder). Pin the rich form so a future
     ROM-level downgrade is caught loudly."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=b"print(undefined_name)\n\x04",
@@ -494,7 +494,7 @@ def test_micropython_core_features_str_modulo(micropython_bin: Path) -> None:
     """C-style `%` string formatting (`'%d-%s' % (5, 'x')`) is gated
     on `MICROPY_PY_BUILTINS_STR_OP_MODULO` which default-enables at
     CORE_FEATURES. Pins the formatter end-to-end."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=b"print('%d-%s' % (5, 'x'))\n\x04",
@@ -513,7 +513,7 @@ def test_micropython_import_sys(micropython_bin: Path) -> None:
     moduledefs.h registered `mp_module_sys`, this raised
     `ImportError: no module named 'sys'`. Pins both the registration
     + the sys module's static-init."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=b"import sys\nprint(sys.implementation.name)\n\x04",
@@ -532,7 +532,7 @@ def test_micropython_import_gc(micropython_bin: Path) -> None:
     """`import gc; gc.collect()` exercises the gc module + its
     `gc.collect` entry. Gated on `MICROPY_PY_GC` which default-on
     at CORE_FEATURES."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=b"import gc\ngc.collect()\nprint('ok')\n\x04",
@@ -550,7 +550,7 @@ def test_micropython_import_collections(micropython_bin: Path) -> None:
     """`import collections; OrderedDict` exercises the collections
     module — gated on `MICROPY_PY_COLLECTIONS` (CORE_FEATURES)
     and a uc386-side moduledefs.h registration."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=(
@@ -575,7 +575,7 @@ def test_micropython_import_struct(micropython_bin: Path) -> None:
     """`import struct; struct.pack` exercises struct module — gated
     on `MICROPY_PY_STRUCT` (CORE_FEATURES). Pinned because struct's
     little-endian byte layout is sensitive to misaligned codegen."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=(
@@ -603,7 +603,7 @@ def test_micropython_import_errno(micropython_bin: Path) -> None:
     constant expression (got Identifier)` because the qstrs aren't
     enum constants the static-init can resolve. Pin so a future
     config change doesn't silently drop the surface."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=b"import errno\nprint(errno.EINVAL)\n\x04",
@@ -629,7 +629,7 @@ def test_micropython_import_math(micropython_bin: Path) -> None:
     Also pin the constant pi (gated on MICROPY_PY_MATH_CONSTANTS at
     EXTRA_FEATURES — we don't have it, so this test only checks
     sqrt). Result `1.414...` proves the FPU path works end-to-end."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=(
@@ -661,7 +661,7 @@ def test_micropython_float_arithmetic(micropython_bin: Path) -> None:
     verify-retry loop in py/formatfloat.c, the repr is
     CPython-compatible — `4.0` prints as `4.0`, not as
     `3.999999999999997`."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=b"print(1.5 + 2.5)\n\x04",
@@ -682,7 +682,7 @@ def test_micropython_float_repr_round_trips(micropython_bin: Path) -> None:
     to the same double. Pre-fix (APPROX), `print(1e10)` showed as
     `09999999999.99998` and `print(0.1)` as `0.0999999999999999`.
     Post-fix, simple values get their canonical literal form."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=(
@@ -722,7 +722,7 @@ def test_micropython_math_special_functions(micropython_bin: Path) -> None:
     erf(0.5) ≈ 0.520) so a future libc-side regression in any of
     the FPU primitives shows up here."""
     import math as cmath_local
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=(
@@ -769,7 +769,7 @@ def test_micropython_import_time_ticks(micropython_bin: Path) -> None:
     Pin `ticks_diff(after, before) >= 0` and that two consecutive
     reads don't move backwards — that's the contract user code
     relies on."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=(
@@ -795,7 +795,7 @@ def test_micropython_time_sleep_ms(micropython_bin: Path) -> None:
     proves mp_hal_delay_ms wires through to the BIOS counter and
     actually polls. Without the BIOS poll loop the call returns
     instantly and ticks_diff stays at 0."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=(
@@ -828,7 +828,7 @@ def test_micropython_time_time_dos_rtc(micropython_bin: Path) -> None:
     32-bit small int. Pin a wide ballpark (epoch in [year 2024,
     year 2030]) so the test isn't fragile if the synthetic date
     moves forward."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=(
@@ -854,7 +854,7 @@ def test_micropython_time_localtime_dos_rtc(micropython_bin: Path) -> None:
     synthetic 2026-05-03 12:34:00 from dos_emu — proves the
     INT 21h date+time → struct_time conversion path is
     end-to-end correct."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=(
@@ -879,7 +879,7 @@ def test_micropython_time_gmtime_constant(micropython_bin: Path) -> None:
     struct_time independent of the RTC. With
     MICROPY_EPOCH_IS_2000=1 (default), epoch 0 is
     2000-01-01 00:00:00 UTC (Saturday, day 1)."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=(
@@ -905,7 +905,7 @@ def test_micropython_time_time_ns_dos_rtc(micropython_bin: Path) -> None:
     `MICROPY_LONGINT_IMPL_LONGLONG` int support — without it,
     `mp_obj_new_int_from_ull` is a stub that always raises
     `OverflowError`."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=(
@@ -932,7 +932,7 @@ def test_micropython_long_long_int_arithmetic(micropython_bin: Path) -> None:
     print correctly — both well outside the 31-bit small-int
     range. Without long-long support, these raise OverflowError
     via `mp_obj_new_int_from_ll`."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=(
@@ -965,7 +965,7 @@ def test_micropython_sys_exit_raises_systemexit(micropython_bin: Path) -> None:
     `mp_raise_type_arg(&mp_type_SystemExit, args[0])`. We catch
     here so the harness can assert the exit code without
     pyexec_friendly_repl bailing the whole REPL."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=(
@@ -998,7 +998,7 @@ def test_micropython_sys_modules_is_dict(micropython_bin: Path) -> None:
     entries (mp_obj_dict_store call at line 483). So we verify
     `sys.modules` is a real dict by storing something into it
     and reading it back."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=(
@@ -1035,7 +1035,7 @@ def test_micropython_sys_path_is_mutable_list(micropython_bin: Path) -> None:
     routes `mp_module_sys` → `mp_module_sys_attr` for objmodule.c's
     delegation table; without that, every sys.* attr access raises
     AttributeError."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=(
@@ -1070,7 +1070,7 @@ def test_micropython_sys_argv_is_empty_list(micropython_bin: Path) -> None:
     `python -c '...'` sees. Verify the type is `list` and
     `len(argv) == 0`, plus `argv.append('foo')` works (proving
     the list object is real, not a stub)."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=(
@@ -1097,7 +1097,7 @@ def test_micropython_builtin_help(micropython_bin: Path) -> None:
     """`help()` (no arg) prints the default help text from
     `py/builtinhelp.c:mp_help_default_text`. Pin the
     `Welcome to MicroPython!` first line as a smoke."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=b"help()\n\x04",
@@ -1118,7 +1118,7 @@ def test_micropython_module_dunder_file(micropython_bin: Path) -> None:
     module with `__file__` = `lex->source_name`. Our
     `uc386-dos/file_uc386dos.c:mp_lexer_new_from_file` builds the
     lexer from the import filename qstr."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=(
@@ -1150,7 +1150,7 @@ def test_micropython_stack_check_catches_runaway_recursion(micropython_bin: Path
     `RuntimeError("maximum recursion depth exceeded")` instead
     of running off the end of the dos_emu 1 MB stack and
     triggering UC_ERR_WRITE_UNMAPPED."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=(
@@ -1179,7 +1179,7 @@ def test_micropython_random_seeded(micropython_bin: Path) -> None:
     """`random.seed(N)` then `random.getrandbits(8)` is
     deterministic — yasmarang PRNG. Pin a value against the
     seed-42 sequence."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=(
@@ -1202,7 +1202,7 @@ def test_micropython_random_seeded(micropython_bin: Path) -> None:
 def test_micropython_binascii_hexlify(micropython_bin: Path) -> None:
     """`binascii.hexlify(b'abc')` → `b'616263'`. Pin a basic
     round-trip through the binascii module's hex codec."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=(
@@ -1228,7 +1228,7 @@ def test_micropython_hashlib_sha256(micropython_bin: Path) -> None:
     """`hashlib.sha256(b'hello').hexdigest()` → known SHA-256.
     Validates the inline-included `lib/crypto-algorithms/sha256.c`
     impl produces the canonical RFC-6234 reference output."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=(
@@ -1256,7 +1256,7 @@ def test_micropython_os_mkdir_chdir_getcwd(micropython_bin: Path) -> None:
 
     dos_emu maintains a synthetic vdirs set + vcwd string that the
     handlers read/write."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=(
@@ -1287,7 +1287,7 @@ def test_micropython_deflate_inflate_roundtrip(micropython_bin: Path) -> None:
     compiler. The hex blob is `zlib.compress(b'hello world')[2:-4]`
     from CPython — strips the 2-byte zlib header and 4-byte
     adler32 trailer."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=(
@@ -1315,7 +1315,7 @@ def test_micropython_binascii_crc32(micropython_bin: Path) -> None:
     CRC32 = 0x0d4a1185 = 222957957. Backed by uzlib's crc32.c
     via moddeflate.c's inline include (the symbol is non-static
     and binascii.c references it as an extern)."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=(
@@ -1337,7 +1337,7 @@ def test_micropython_binascii_crc32(micropython_bin: Path) -> None:
 def test_micropython_heapq(micropython_bin: Path) -> None:
     """`heapq.heappush` + `heappop` round-trip — pop returns
     elements in sorted order."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=(
@@ -1363,7 +1363,7 @@ def test_micropython_os_stat(micropython_bin: Path) -> None:
     """`os.stat(path)` — returns 10-tuple matching CPython's
     `os.stat_result`. Index 6 is `st_size`. Backed by uc386's
     libc `stat()` (INT 21h-based)."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=(
@@ -1390,7 +1390,7 @@ def test_micropython_os_listdir(micropython_bin: Path) -> None:
     in lib/i386_dos_libc.asm. dos_emu's handlers iterate the
     in-memory `vfiles` and `vdirs` and write filenames into the
     caller's DTA at +30."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=(
@@ -1418,7 +1418,7 @@ def test_micropython_os_rename_unlink(micropython_bin: Path) -> None:
     """`os.rename` (INT 21h AH=0x56) + `os.unlink` (AH=0x41).
     Create a file, rename it, read the new name, unlink, verify
     gone."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=(
@@ -1457,7 +1457,7 @@ def test_micropython_math_gamma(micropython_bin: Path) -> None:
     gamma(N) = (N-1)! → gamma(5) ≈ 24, gamma(1) = 1.
     gamma(0.5) = √π ≈ 1.7724538509.
     lgamma(10) = log(9!) ≈ log(362880) ≈ 12.8018."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=(
@@ -1494,7 +1494,7 @@ def test_micropython_cmath_basic(micropython_bin: Path) -> None:
     """`import cmath` complex-number math. Validates abs(),
     cmath.exp on imaginary axis (Euler's formula:
     exp(i*x) = cos(x) + i*sin(x))."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=(
@@ -1525,7 +1525,7 @@ def test_micropython_re_match_groups(micropython_bin: Path) -> None:
     """`re.match(pattern, string)` with capture groups. Validates
     the `lib/re1.5/*.c` regex engine end-to-end through the re
     module's MicroPython surface (`m.group(N)` indexing)."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=(
@@ -1551,7 +1551,7 @@ def test_micropython_uctypes_struct_roundtrip(micropython_bin: Path) -> None:
     little-endian. With MICROPY_PY_UCTYPES=1 build_port.sh adds
     extmod/moductypes.c to the source list and build.sh's
     moduledefs.h registers `uctypes`."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=(
@@ -1583,7 +1583,7 @@ def test_micropython_extra_features_compile(micropython_bin: Path) -> None:
     Compiles a small string-source program and exec's it, proving
     the runtime parser + bytecode emitter are both reachable from
     user code."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=(
@@ -1604,7 +1604,7 @@ def test_micropython_extra_features_compile(micropython_bin: Path) -> None:
 def test_micropython_extra_features_memoryview(micropython_bin: Path) -> None:
     """`memoryview` is EXTRA_FEATURES-gated. Pin construction over
     a bytearray + indexing returning the right byte value."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=(
@@ -1627,7 +1627,7 @@ def test_micropython_extra_features_collections_deque(micropython_bin: Path) -> 
     """`collections.deque` is EXTRA_FEATURES-gated. Pin a basic
     append + popleft round-trip — proves objdeque.c's static-init
     + the FIFO behavior end-to-end."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=(
@@ -1654,7 +1654,7 @@ def test_micropython_extra_features_math_constants(micropython_bin: Path) -> Non
     so a future config change doesn't silently drop them. The nan
     check uses `math.isnan` (also EXTRA-gated indirectly via
     `MICROPY_PY_MATH_ISCLOSE`-shape API surface)."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=(
@@ -1684,7 +1684,7 @@ def test_micropython_extra_features_math_constants(micropython_bin: Path) -> Non
 def test_micropython_extra_features_math_factorial(micropython_bin: Path) -> None:
     """`math.factorial` is EXTRA_FEATURES-gated. Pin the standard
     `5! = 120` value end-to-end."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=b"import math\nprint(math.factorial(5))\n\x04",
@@ -1702,7 +1702,7 @@ def test_micropython_extra_features_math_isclose(micropython_bin: Path) -> None:
     """`math.isclose` is EXTRA_FEATURES-gated. Pin both the
     matching and non-matching cases (1.0 vs 1.0+1e-10 are close;
     1.0 vs 1.5 are not)."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=(
@@ -1725,7 +1725,7 @@ def test_micropython_extra_features_math_isclose(micropython_bin: Path) -> None:
 def test_micropython_extra_features_bytes_hex(micropython_bin: Path) -> None:
     """`bytes.hex` / `bytes.fromhex` are EXTRA-gated. Pin both
     directions of the round-trip."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=(
@@ -1750,7 +1750,7 @@ def test_micropython_extra_features_bytes_hex(micropython_bin: Path) -> None:
 def test_micropython_extra_features_fstring(micropython_bin: Path) -> None:
     """f-strings are EXTRA-gated via `MICROPY_PY_FSTRINGS`. Pin
     both literal substitution and the formatter."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=(
@@ -1772,7 +1772,7 @@ def test_micropython_extra_features_inplace_special(micropython_bin: Path) -> No
     """`MICROPY_PY_ALL_INPLACE_SPECIAL_METHODS` lights up
     `__iadd__` etc. on class instances. Pin a small `__iadd__`
     override + `+=` round-trip."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=(
@@ -1797,7 +1797,7 @@ def test_micropython_extra_features_inplace_special(micropython_bin: Path) -> No
 
 def test_micropython_extra_features_frozenset(micropython_bin: Path) -> None:
     """`frozenset` is gated on `MICROPY_PY_BUILTINS_FROZENSET`."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=b"print(frozenset([1,2,3]))\n\x04",
@@ -1815,7 +1815,7 @@ def test_micropython_extra_features_special_methods(micropython_bin: Path) -> No
     """`MICROPY_PY_ALL_SPECIAL_METHODS` lights up class instance
     binary-op overrides (`__and__`, `__add__`, etc). Pin a small
     `__add__` override to prove the dispatch path resolves."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=(
@@ -1842,7 +1842,7 @@ def test_micropython_open_read(micropython_bin: Path) -> None:
     a DOS file handle. Backing INT 21h calls (open/read/close)
     flow through dos_emu's vfile layer for the test, but production
     just hits real DOS via `_open` etc. in lib/i386_dos_libc.asm."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=(
@@ -1867,7 +1867,7 @@ def test_micropython_open_write_read_roundtrip(micropython_bin: Path) -> None:
     full write path via INT 21h AH=0x40 (and create-via-AH=0x3D mode 1).
     Pin both that the write returns the byte count and that the data
     survives a close/reopen."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=(
@@ -1902,7 +1902,7 @@ def test_micropython_import_from_disk(micropython_bin: Path) -> None:
     SEEK_END (was inheriting stale upper-16 bits of EAX, leading
     to multi-MB phantom file sizes and `MemoryError: allocating
     17760257 bytes`)."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=(
@@ -1932,7 +1932,7 @@ def test_micropython_import_array(micropython_bin: Path) -> None:
     """`import array; array.array('i', ...)` — gated on
     `MICROPY_PY_ARRAY` (CORE_FEATURES). Pins typed-array storage
     + iteration."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=(
@@ -1955,7 +1955,7 @@ def test_micropython_os_getenv(micropython_bin: Path) -> None:
     """`os.getenv(name, default)` walks the DOS env block via
     libc's `_getenv` (INT 21h AH=0x62 → PSP[0x2C] → linear addr).
     dos_emu populates a fake env block from the `env=` kwarg."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=(
@@ -1988,7 +1988,7 @@ def test_micropython_os_environ(micropython_bin: Path) -> None:
     modules don't support attribute-getter delegation, so we expose
     a function instead. Snapshot is built by walking
     `dos_env_iter(0..)` and splitting on '='."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=(
@@ -2013,7 +2013,7 @@ def test_micropython_base64(micropython_bin: Path) -> None:
     — port-supplied module (uc386-dos/base64_uc386dos.c) implementing
     RFC 4648 base64 + base16 directly. Pin RFC 4648 test vectors so
     encoder/decoder don't drift."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=(
@@ -2048,7 +2048,7 @@ def test_micropython_shutil_copy_move(micropython_bin: Path) -> None:
     """`shutil.copy` reads src → writes dst (open/read/write loop
     in 4 KB chunks). `shutil.move` tries os.rename first (atomic
     same-volume) and falls back to copy+unlink."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=(
@@ -2087,7 +2087,7 @@ def test_micropython_tempfile(micropython_bin: Path) -> None:
     back to "C:\\". `tempfile.mktemp()` returns a path that doesn't
     exist (probed via libc stat), with a counter that increments
     across calls so consecutive mktemp results never collide."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=(
@@ -2122,7 +2122,7 @@ def test_micropython_os_path_join_split(micropython_bin: Path) -> None:
     is the canonical separator; both '\\' and '/' are accepted on
     input. Drive prefixes (`C:`) reset join() like CPython on Win.
     Test pins the major edge cases."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=(
@@ -2163,7 +2163,7 @@ def test_micropython_os_path_exists(micropython_bin: Path) -> None:
     """`os.path.exists` / `isfile` against a seeded vfile. Backed
     by libc's stat() (INT 21h AH=0x42 lseek-to-end). True for a
     file we explicitly seeded; False for a non-existent name."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=(
@@ -2194,7 +2194,7 @@ def test_micropython_os_path_getsize_isabs_abspath(micropython_bin: Path) -> Non
     """`os.path.getsize` (stat-backed), `os.path.isabs` (string check
     for sep prefix or drive letter), `os.path.abspath` (prefixes
     getcwd() if relative + dedups separators)."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=(
@@ -2237,7 +2237,7 @@ def test_micropython_os_path_normpath(micropython_bin: Path) -> None:
     """`os.path.normpath` collapses redundant separators and
     canonicalizes forward-slash → backslash. Doesn't resolve `..`
     (DOS conventions vary, conservative)."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=(
@@ -2261,7 +2261,7 @@ def test_micropython_sys_exc_info(micropython_bin: Path) -> None:
     """`sys.exc_info()` returns the (type, value, tb) tuple inside
     an except block, and (None, None, None) outside. Default OFF
     in mpconfig.h — opted in via MICROPY_PY_SYS_EXC_INFO."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=(
@@ -2289,7 +2289,7 @@ def test_micropython_range_binop(micropython_bin: Path) -> None:
     MICROPY_PY_BUILTINS_RANGE_BINOP is on (default-off below the
     EVERYTHING ROM level). Without it ranges only compare equal
     by identity — a frequent CPython-portability surprise."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=(
@@ -2323,7 +2323,7 @@ def test_micropython_hashlib_md5(micropython_bin: Path) -> None:
     canonical test vector. Backed by B-Con's public-domain md5.c
     (fetched into upstream/lib/crypto-algorithms/) routed through
     uc386-dos/lib/axtls/crypto/crypto.h's AXTLS-shaped shim."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=(
@@ -2351,7 +2351,7 @@ def test_micropython_hashlib_sha1(micropython_bin: Path) -> None:
     """`hashlib.sha1(b"abc").hexdigest()` should equal FIPS 180-1's
     canonical test vector. Same path as md5 — B-Con's sha1.c routed
     via the AXTLS-shaped crypto.h shim."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=(
@@ -2375,7 +2375,7 @@ def test_micropython_json_roundtrip(micropython_bin: Path) -> None:
     `extmod/modjson.c`, gated on MICROPY_PY_JSON (default 1 at
     EXTRA_FEATURES). Pulled into the build alongside modplatform.c
     in the same slice that adds these tests."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=(
@@ -2404,7 +2404,7 @@ def test_micropython_platform_module(micropython_bin: Path) -> None:
     upstream's `extmod/modplatform.c`. We pin the version stamp
     set in mpconfigport.h so platform.platform() is recognizable
     rather than a generic 'MicroPython'."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=(
@@ -2436,7 +2436,7 @@ def test_micropython_os_system_exec(micropython_bin: Path) -> None:
     (writes args to stdout, exit 0) and EXIT N (returns N as the
     child exit code). Real DOS would shell out through COMMAND.COM
     via the same call."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=(
@@ -2486,7 +2486,7 @@ def test_micropython_lwip_loopback_tcp(micropython_bin: Path) -> None:
     3. `uc386dos_loopback_poll` must call `netif_poll_all()` not
        `netif_poll(netif_default)` — `netif_default` stays NULL
        because netif_init doesn't promote `loop_netif`."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=(
@@ -2543,7 +2543,7 @@ def test_micropython_lwip_loopback_tcp(micropython_bin: Path) -> None:
 
 def _run_dhcp(micropython_bin: Path, *, crynwr_int_num):
     """Shared driver: bring up eth, run DHCP discovery, return Result + sim."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
     from uc386.dos_emu_netsim import NetworkSimulator
 
     net = NetworkSimulator(crynwr_int_num=crynwr_int_num)
@@ -2669,7 +2669,7 @@ def test_micropython_lwip_dns_query(micropython_bin: Path) -> None:
     3. The DNS handler decodes the question, looks up the A record,
        and builds a spec-shaped reply that lwIP's resolver accepts.
     """
-    from uc386.dos_emu import run
+    from uc386.harness import run
     from uc386.dos_emu_netsim import NetworkSimulator
 
     net = NetworkSimulator()
@@ -2730,7 +2730,7 @@ def test_micropython_select_poll(micropython_bin: Path) -> None:
        MP_STREAM_POLL_RD fires when data lands.
     3. POLL_HOOK keeps draining loop_netif during poll waits.
     """
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=(
@@ -2792,7 +2792,7 @@ def test_micropython_lwip_udp_socket(micropython_bin: Path) -> None:
     (DHCP and DNS go through internal lwIP code, so this is the
     first SOCK_DGRAM exercise via modlwip's send/recv glue).
     """
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=(
@@ -2841,7 +2841,7 @@ def test_micropython_lwip_http_loopback(micropython_bin: Path) -> None:
     one segment per direction and that the recv buffer assembly is
     correct under non-blocking I/O.
     """
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     res = run(micropython_bin,
               stdin_bytes=(
@@ -2971,7 +2971,7 @@ def test_micropython_import_ssl(micropython_bin: Path) -> None:
     The module exposes `SSLContext`, `PROTOCOL_TLS_CLIENT`, and
     `CERT_NONE`.
     """
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     program = (
         b"import ssl\n"
@@ -2993,7 +2993,7 @@ def test_micropython_import_ssl(micropython_bin: Path) -> None:
 def test_micropython_ssl_context_construct(micropython_bin: Path) -> None:
     """SSLContext(PROTOCOL_TLS_CLIENT) should construct without
     raising; verify_mode defaults to CERT_NONE."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     program = (
         b"import ssl\n"
@@ -3017,7 +3017,7 @@ def test_micropython_ssl_verify_mode_settable(micropython_bin: Path) -> None:
     stored value. Regression for the upstream-divergence in our
     vendored modtls_axtls_uc386dos.c (upstream hard-codes the read
     to CERT_NONE; we honor the field)."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     program = (
         b"import ssl\n"
@@ -3082,7 +3082,7 @@ def test_micropython_ssl_load_verify_locations(micropython_bin: Path) -> None:
     ssl_obj_memory_load(SSL_OBJ_X509_CACERT, ...) — gated on
     CONFIG_SSL_HAS_PEM=1 + CONFIG_SSL_CERT_VERIFICATION=1, both
     flipped by fetch.sh's patch_axtls_config_verify hook."""
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     pem_bytes = ISRG_ROOT_X1_PEM
     program = (
@@ -3112,7 +3112,7 @@ def test_micropython_select_module_imports(micropython_bin: Path) -> None:
     constructing the poller and checking the type/constants is enough
     to pin the module-registration path.
     """
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     program = (
         b"import select\n"
@@ -3145,7 +3145,7 @@ def test_micropython_asyncio_taskqueue(micropython_bin: Path) -> None:
     files shipped to the DOS image — not in scope for this smoke. Test
     only the C layer.
     """
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     program = (
         b"import _asyncio\n"
@@ -3182,7 +3182,7 @@ def test_micropython_machine_module(micropython_bin: Path) -> None:
     run a flat .bin in an emulator with no BIOS), so the read returns
     0; we just assert it didn't crash and produced an integer.
     """
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     program = (
         b"import machine\n"
@@ -3218,7 +3218,7 @@ def test_micropython_ssl_load_verify_locations_requires_cadata(micropython_bin: 
     DOS without a VFS bridge to axtls). Exercises the parameter
     validation path before any axtls call.
     """
-    from uc386.dos_emu import run
+    from uc386.harness import run
 
     program = (
         b"import ssl\n"
