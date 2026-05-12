@@ -432,6 +432,64 @@ static int pktdrv_alloc_thunk(void) {
     thunk[10] = 0; thunk[11] = 0;
     thunk[12] = 0; thunk[13] = 0;
     thunk[14] = 0; thunk[15] = 0;
+    // Real-mode RX receiver stub starting at offset 0x10.  Crynwr
+    // packet drivers (NE2000.COM etc.) FAR-CALL this from their IRQ
+    // handler when a packet matching our access_type filter arrives.
+    // The DPMI fn 0x0303 callback path used to host this in PM, but
+    // DOS/32A's 0x0303 dispatch corrupts state under the IRQ-context
+    // FAR CALL -- next INT 0x1A faults with #GP at popped CS = bad
+    // selector.  This stub stays entirely in real mode (no DPMI host
+    // involvement), so there's nothing for DOS/32A to corrupt.
+    //
+    // Crynwr calling convention (Phase 0 = "give buffer", Phase 1 =
+    // "buffer filled"):
+    //   AX = phase, CX = length (phase 0 only), BX = handle
+    //   phase 0 returns ES:DI = buffer (or 0:0 to drop)
+    //   phase 1 returns nothing
+    //
+    // Layout within the 80-byte (5-paragraph) thunk allocation:
+    //   offset 0x10..0x3F = receiver code (48 bytes)
+    //   offset 0x40       = pending word  (set by phase 1; MP polls)
+    //   offset 0x42       = length word   (set by phase 0)
+    //   offset 0x44       = bounce_seg    (initialised below from
+    //                       pktdrv_bounce_seg; phase 0 reads to
+    //                       return ES:DI = bounce_seg:0)
+    //
+    // Hand-assembled bytes; see comments for the corresponding x86
+    // mnemonics.  The CS: prefix (0x2E) on every memory reference
+    // is required because at FAR-CALL entry the only segment
+    // register guaranteed to point at our paragraph is CS.
+    static const unsigned char rcv_code[] = {
+        0x09, 0xC0,                      // or  ax, ax
+        0x75, 0x23,                      // jnz .phase1 (to off 0x37)
+        0x2E, 0x83, 0x3E, 0x40, 0x00, 0x00,  // cmp word [cs:0x40], 0
+        0x75, 0x14,                      // jnz .drop (to off 0x30)
+        0x81, 0xF9, 0xEE, 0x05,          // cmp cx, 1518
+        0x77, 0x0E,                      // ja  .drop (to off 0x30)
+        0x2E, 0x89, 0x0E, 0x42, 0x00,    // mov [cs:0x42], cx
+        0x2E, 0xA1, 0x44, 0x00,          // mov ax, [cs:0x44]
+        0x8E, 0xC0,                      // mov es, ax
+        0x31, 0xFF,                      // xor di, di
+        0xCB,                            // retf
+        // .drop at offset 0x30:
+        0x31, 0xC0,                      // xor ax, ax
+        0x8E, 0xC0,                      // mov es, ax
+        0x31, 0xFF,                      // xor di, di
+        0xCB,                            // retf
+        // .phase1 at offset 0x37:
+        0x2E, 0xC7, 0x06, 0x40, 0x00, 0x01, 0x00,  // mov word [cs:0x40], 1
+        0xCB,                            // retf
+    };
+    for (unsigned int i = 0; i < sizeof(rcv_code); i++) {
+        thunk[0x10 + i] = rcv_code[i];
+    }
+    // pending, length cleared to zero; bounce_seg initialised below
+    // (set to pktdrv_bounce_seg if alloc succeeded, else 0 -- which
+    // makes phase 0 drop everything since ES:DI = 0:0).
+    thunk[0x40] = 0; thunk[0x41] = 0;
+    thunk[0x42] = 0; thunk[0x43] = 0;
+    thunk[0x44] = (unsigned char)(pktdrv_bounce_seg & 0xFF);
+    thunk[0x45] = (unsigned char)((pktdrv_bounce_seg >> 8) & 0xFF);
     pktdrv_thunk_seg = seg;
     // Dump thunk content (16 bytes) as 4 dwords for verification.
     _diag_hex32("tk03", ((unsigned int)thunk[0]<<24)
@@ -1044,12 +1102,22 @@ int pktdrv_init(unsigned char mac[6]) {
     }
 
     unsigned int receiver_linear;
-    if (pktdrv_alloc_dpmi_callback() == 0) {
+    if (pktdrv_thunk_seg != 0) {
+        // Real-mode receiver stub in the thunk paragraph (offset
+        // 0x10).  Bypasses DPMI fn 0x0303 -- under DOS/32A that
+        // dispatch corrupts state when Crynwr's IRQ handler calls
+        // it.  See pktdrv_alloc_thunk for the stub layout, and
+        // pktdrv_poll_rmstub for the MP-side drain.
+        receiver_linear = ((unsigned int)pktdrv_thunk_seg << 16) | 0x0010;
+        write(1, "[rcv:rmstub]", 12);
+    } else if (pktdrv_alloc_dpmi_callback() == 0) {
         write(1, "[dpmi:cb-ok]", 12);
         _diag_hex32("dpSG", pktdrv_dpmi_seg);
         _diag_hex32("dpOF", pktdrv_dpmi_off);
         // DPMI trampoline succeeded — encode its real-mode
-        // seg:offset for access_type's ES:DI.
+        // seg:offset for access_type's ES:DI.  Fallback path for
+        // setups without a thunk paragraph (no longer exercised
+        // by real DOS but kept for completeness).
         receiver_linear = (pktdrv_dpmi_seg << 16) | (pktdrv_dpmi_off & 0xFFFF);
     } else {
         write(1, "[dpmi:cb-fail]", 14);
@@ -1269,11 +1337,42 @@ int pktdrv_send(const unsigned char *buf, unsigned int len) {
 // Drain the RX slot if one is pending. Returns the byte count
 // written (clamped to maxlen) or 0 if nothing's queued. Truncates
 // silently on overflow.
+// Real-mode receiver-stub drain: if Crynwr's IRQ handler has filled
+// the bounce buffer (stub's pending word at thunk[0x40] is set), copy
+// it into pktdrv_rx_buf, clear the stub's pending, and set
+// pktdrv_rx_pending so pktdrv_recv picks it up below.
+static void pktdrv_poll_rmstub(void) {
+    if (pktdrv_thunk_seg == 0) return;
+    if (pktdrv_rx_pending != 0) return;   // MP hasn't consumed last frame
+    unsigned int thunk_lin = (unsigned int)pktdrv_thunk_seg << 4;
+    volatile unsigned short *st_pending =
+        (volatile unsigned short *)(unsigned long)(thunk_lin + 0x40);
+    volatile unsigned short *st_length  =
+        (volatile unsigned short *)(unsigned long)(thunk_lin + 0x42);
+    if (*st_pending == 0) return;
+    unsigned int n = *st_length;
+    if (n == 0 || n > sizeof(pktdrv_rx_buf)) {
+        *st_pending = 0;   // discard bogus length
+        return;
+    }
+    if (pktdrv_bounce_linear != 0) {
+        memcpy(pktdrv_rx_buf,
+               (const unsigned char *)(unsigned long)pktdrv_bounce_linear, n);
+    }
+    pktdrv_rx_len = n;
+    *st_pending = 0;
+    pktdrv_rx_pending = 1;
+}
+
 unsigned int pktdrv_recv(unsigned char *out, unsigned int maxlen) {
     // PM-native NE2000 path: poll the NIC ring directly.
     if (ne2k_initialized) {
         return ne2k_poll_rx(out, maxlen);
     }
+    // Drain the real-mode receiver stub first; it transfers any
+    // pending bounce-buffer frame into pktdrv_rx_buf + sets
+    // pktdrv_rx_pending.  No-op if no thunk paragraph (dos_emu).
+    pktdrv_poll_rmstub();
     if (!pktdrv_rx_pending) {
         return 0;
     }
