@@ -203,6 +203,14 @@ int uc386dos_eth_start(int dhcp_start_now) {
     netif_set_up(&uc386dos_eth_netif);
     netif_set_link_up(&uc386dos_eth_netif);
     uc386dos_eth_active = 1;
+    // Wire the lwIP poll hook so `lwip.callback()` from MicroPython
+    // pumps both loopback delivery and our RX queue.  Without this the
+    // poll is NULL until the caller invokes `lwip.reset()`; NETBASE.PY
+    // (and most scripts) don't, so received frames sit in the polling
+    // buffer forever.  modlwip.c's `mod_lwip_reset` also sets this,
+    // but only when `lwip.reset()` is called explicitly.
+    extern void mod_lwip_register_poll(void (*poll)(void *), void *arg);
+    mod_lwip_register_poll(uc386dos_loopback_poll, NULL);
     if (dhcp_start_now) {
         if (dhcp_start(&uc386dos_eth_netif) != ERR_OK) {
             return -3;

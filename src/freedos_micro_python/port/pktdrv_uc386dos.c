@@ -932,6 +932,29 @@ static int pktdrv_alloc_dpmi_callback(void) {
 // don't implement AH=0x99; pktdrv_recv simply returns 0 there until
 // the DPMI trampoline replaces this.
 static void pktdrv_register_polling_rx(void) {
+    // Try the real-mode-thunk path first (DPMI fn 0x0301 -> INT 0x60
+    // through the CD 60 CB stub).  Under dosiz that's the path that
+    // actually reaches the virtual Crynwr handler -- a bare INT 0x60
+    // from PM bypasses dosiz's INT 0x60 IDT gate for reasons we don't
+    // fully understand yet (the gate is installed, CPL=0, gate DPL=3,
+    // target CS DPL=0; still nothing fires).  The same DPMI path is
+    // what AH=02 / 06 / 14 / 04 already use successfully here, so
+    // staying on it keeps AH=99 consistent.
+    if (pktdrv_thunk_seg != 0) {
+        static pktdrv_rmcs_t rm;
+        rm.edi = (unsigned int)(unsigned long)pktdrv_rx_buf;
+        rm.esi = (unsigned int)(unsigned long)&pktdrv_rx_pending;
+        rm.ecx = (unsigned int)(unsigned long)&pktdrv_rx_len;
+        rm.ebx = 0; rm.edx = 0; rm.ebp = 0; rm.reserved = 0;
+        rm.eax = 0x9900;
+        rm.flags = 0;
+        rm.es = 0; rm.ds = 0; rm.fs = 0; rm.gs = 0;
+        rm.ip = 0; rm.cs = 0; rm.sp = 0; rm.ss = 0;
+        (void)pktdrv_call_int60_thunk(&rm);
+        return;
+    }
+    // Fallback: bare INT (dos_emu intercepts at the prot-mode INT
+    // level, so this works there even without the thunk).
     unsigned int regs[8] = {0};
     regs[R_EAX] = 0x9900;
     regs[R_EDI] = (unsigned int)(unsigned long)pktdrv_rx_buf;
