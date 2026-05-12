@@ -59,6 +59,15 @@ if grep -q '^#include MICROPY_PY_TIME_INCLUDEFILE$' upstream/extmod/modtime.c; t
     rm -f upstream/extmod/modtime.c.bak
 fi
 
+# Same patch shape for modmachine — uc386 can't expand
+# MICROPY_PY_MACHINE_INCLUDEFILE in #include position either.
+if grep -q '^#include MICROPY_PY_MACHINE_INCLUDEFILE$' upstream/extmod/modmachine.c; then
+    sed -i.bak \
+        's|^#include MICROPY_PY_MACHINE_INCLUDEFILE$|#include "modmachine_uc386dos.c"|' \
+        upstream/extmod/modmachine.c
+    rm -f upstream/extmod/modmachine.c.bak
+fi
+
 # Patch upstream/ports/minimal/main.c so its stub `mp_import_stat`
 # and `mp_lexer_new_from_file` don't collide with the real
 # implementations our port provides in `uc386-dos/file_uc386dos.c`.
@@ -453,6 +462,30 @@ extern const struct _mp_obj_module_t mp_module_select;
 #define UCDOS_MOD_ENTRY_SELECT
 #endif
 
+// `_asyncio` — extmod/modasyncio.c. Provides the TaskQueue + Task
+// primitives that the user-facing asyncio.* Python wrapper imports
+// from. The wrapper itself (extmod/asyncio/*.py) is not frozen into
+// the binary; ship it as plain .py to the DOS image and the import
+// system will find it via MICROPY_ENABLE_EXTERNAL_IMPORT.
+#if MICROPY_PY_ASYNCIO
+extern const struct _mp_obj_module_t mp_module_asyncio;
+#define UCDOS_MOD_ENTRY_ASYNCIO { MP_ROM_QSTR(MP_QSTR__asyncio), MP_ROM_PTR(&mp_module_asyncio) },
+#else
+#define UCDOS_MOD_ENTRY_ASYNCIO
+#endif
+
+// `machine` — extmod/modmachine.c. Registered upstream as
+// MP_REGISTER_EXTENSIBLE_MODULE (not the usual MP_REGISTER_MODULE),
+// so the entry goes in MICROPY_REGISTERED_EXTENSIBLE_MODULES below
+// rather than the regular module list. mem8/16/32 access via flat-32
+// DS — see mpconfigport.h's MICROPY_PY_MACHINE block.
+#if MICROPY_PY_MACHINE
+extern const struct _mp_obj_module_t mp_module_machine;
+#define UCDOS_MOD_ENTRY_MACHINE { MP_ROM_QSTR(MP_QSTR_machine), MP_ROM_PTR(&mp_module_machine) },
+#else
+#define UCDOS_MOD_ENTRY_MACHINE
+#endif
+
 // `tls` (and the `ssl` alias) — extmod/modtls_axtls.c. Wraps a
 // socket through axtls: SSLContext + wrap_socket -> SSLSocket
 // implementing the standard stream protocol. The actual axtls
@@ -501,6 +534,7 @@ extern const struct _mp_obj_module_t mp_module_tls;
     UCDOS_MOD_ENTRY_SOCKET \
     UCDOS_MOD_ENTRY_UC386_NET \
     UCDOS_MOD_ENTRY_SELECT \
+    UCDOS_MOD_ENTRY_ASYNCIO \
     UCDOS_MOD_ENTRY_TLS \
     UCDOS_MOD_ENTRY_SSL
 
@@ -517,7 +551,19 @@ extern void mp_module_sys_attr(mp_obj_t self_in, qstr attr, mp_obj_t *dest);
     { MP_ROM_PTR(&mp_module_sys), mp_module_sys_attr },
 #endif
 
-#define MICROPY_REGISTERED_EXTENSIBLE_MODULES
+// objmodule.c gates the extensible-module table on this flag; without
+// it set, MICROPY_REGISTERED_EXTENSIBLE_MODULES expands inside a `#if
+// 0` block and `import machine` would fail with "no module named
+// machine". Upstream makemoduledefs.py emits this automatically when
+// any MP_REGISTER_EXTENSIBLE_MODULE is seen; we set it by hand because
+// our moduledefs.h is hand-rolled (see the long comment at the top of
+// this heredoc).
+#if MICROPY_PY_MACHINE
+#define MICROPY_HAVE_REGISTERED_EXTENSIBLE_MODULES (1)
+#endif
+
+#define MICROPY_REGISTERED_EXTENSIBLE_MODULES \
+    UCDOS_MOD_ENTRY_MACHINE
 EOF
 [ -f build/genhdr/mpversion.h ] || cat > build/genhdr/mpversion.h <<'EOF'
 // Triage stub.

@@ -318,6 +318,39 @@ extern void sys_check_timeouts(void);
 #define MICROPY_PY_RE_MATCH_SPAN_START_END (1)
 #define MICROPY_PY_HEAPQ                  (1)
 
+// `select` (poll/select on stream objects) and `_asyncio` (the C-side
+// TaskQueue + Task primitives that asyncio's Python wrapper imports
+// from). Both default to (1) at EXTRA_FEATURES so this is belt-and-
+// suspenders against a future ROM-level change. modselect.c +
+// modasyncio.c are added to build_port.sh's source list. The
+// user-facing `asyncio.*` Python API (extmod/asyncio/*.py) is a
+// separate deployment step — those files need to ship to the DOS
+// image alongside the .bin for `import asyncio` to find them via
+// MICROPY_ENABLE_EXTERNAL_IMPORT. `import _asyncio` and `import
+// select` work directly from the C modules.
+#define MICROPY_PY_SELECT                 (1)
+#define MICROPY_PY_ASYNCIO                (1)
+
+// `machine` — extmod/modmachine.c + extmod/machine_mem.c (+ signal).
+// The main DOS-useful feature is `machine.mem8/16/32`: under DOS/32A's
+// flat-32 DS, linear addresses 0..4G are mapped 1:1, so the default
+// pointer-cast read/write in machine_mem.c lets Python directly poke
+// the BIOS data area (0x400), VGA text memory (0xB8000), packet driver
+// state, etc. The sub-feature flags (RESET / BARE_METAL_FUNCS /
+// DISABLE_IRQ_ENABLE_IRQ / BITSTREAM / PULSE / I2C / SPI / PWM / WDT /
+// UART / TIMER / ADC / DAC / Pin / SoftI2C / SoftSPI) are all left at
+// upstream default (0) because DOS has no underlying device model for
+// them. SIGNAL auto-enables (defaults to MICROPY_PY_MACHINE) so
+// machine_signal.c is linked too — it's a thin wrapper around any
+// `value()`-having object, no Pin dependency.
+//
+// MICROPY_PY_MACHINE_INCLUDEFILE: a port-supplied .c that
+// extmod/modmachine.c `#include`s in-place. We provide it for the
+// `mp_machine_idle()` symbol extmod/modmachine.c declares but never
+// implements. Empty no-op is sufficient.
+#define MICROPY_PY_MACHINE                (1)
+#define MICROPY_PY_MACHINE_INCLUDEFILE    "uc386-dos/modmachine_uc386dos.c"
+
 #define MICROPY_ENABLE_COMPILER           (1)
 #define MICROPY_ENABLE_GC                 (1)
 #define MICROPY_HELPER_REPL               (1)

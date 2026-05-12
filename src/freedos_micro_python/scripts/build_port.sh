@@ -123,6 +123,29 @@ SOURCES_FILE="build/_port_sources.txt"
     echo upstream/extmod/modjson.c
     echo upstream/extmod/modplatform.c
     echo upstream/extmod/modselect.c
+    # modasyncio.c provides the _asyncio builtin module (TaskQueue +
+    # Task primitives). The user-facing asyncio.* Python API lives in
+    # upstream/extmod/asyncio/*.py — those still need to be shipped to
+    # the DOS image as plain .py files (MICROPY_ENABLE_EXTERNAL_IMPORT
+    # is on; frozen .mpy support is off) for `import asyncio` to work.
+    # `import _asyncio` alone uses just this C module.
+    echo upstream/extmod/modasyncio.c
+    # `machine` — modmachine.c is the dispatch table, machine_mem.c
+    # provides mem8/16/32 (the main DOS-useful feature, see
+    # mpconfigport.h's MICROPY_PY_MACHINE block), machine_signal.c is
+    # pulled in because MICROPY_PY_MACHINE_SIGNAL defaults to 1 when
+    # MICROPY_PY_MACHINE is on. modmachine.c includes our port glue at
+    # uc386-dos/modmachine_uc386dos.c via MICROPY_PY_MACHINE_INCLUDEFILE
+    # (so the glue file doesn't appear in this source list).
+    echo upstream/extmod/modmachine.c
+    echo upstream/extmod/machine_mem.c
+    echo upstream/extmod/machine_signal.c
+    # machine_signal.c calls mp_virtual_pin_read/write — those live in
+    # extmod/virtpin.c (the abstract Pin protocol any Pin-like object
+    # plugs into). machine_signal works without a concrete Pin (you can
+    # pass any object with a `value()` method) but the dispatch
+    # functions still need to link.
+    echo upstream/extmod/virtpin.c
     # MD5 + SHA1 are now from upstream/lib/axtls/crypto/ (added below
     # in the axtls section). B-Con's MD5 + SHA1 sources are still
     # fetched by fetch.sh's `fetch_b_con_crypto` hook so the legacy

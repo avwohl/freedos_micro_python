@@ -3105,6 +3105,113 @@ def test_micropython_ssl_load_verify_locations(micropython_bin: Path) -> None:
     )
 
 
+def test_micropython_select_module_imports(micropython_bin: Path) -> None:
+    """`import select` should expose `select.poll()` and the standard
+    poll constants. Gates MICROPY_PY_SELECT + the modselect.c TU in
+    build_port.sh. We don't register any pollable streams here — just
+    constructing the poller and checking the type/constants is enough
+    to pin the module-registration path.
+    """
+    from uc386.dos_emu import run
+
+    program = (
+        b"import select\n"
+        b"p = select.poll()\n"
+        b"print(type(p).__name__)\n"
+        b"print(select.POLLIN, select.POLLOUT)\n"
+        b"\x04\x04"
+    )
+    res = run(micropython_bin,
+              stdin_bytes=program,
+              timeout_seconds=15.0,
+              instruction_limit=4_000_000_000)
+    assert not res.timed_out, "REPL didn't exit"
+    assert res.error is None, f"dos_emu reported error: {res.error}"
+    assert "poll" in res.stdout, (
+        f"select.poll() didn't return a poll-like object: {res.stdout!r}"
+    )
+    assert "1 4" in res.stdout, (
+        f"select.POLLIN/POLLOUT constants missing or wrong (expected "
+        f"`1 4`): {res.stdout!r}"
+    )
+
+
+def test_micropython_asyncio_taskqueue(micropython_bin: Path) -> None:
+    """`import _asyncio` exposes the C-side TaskQueue + Task primitives
+    that the user-facing asyncio Python wrapper imports from. Gates
+    MICROPY_PY_ASYNCIO + the modasyncio.c TU in build_port.sh.
+
+    The full `import asyncio` path needs the upstream extmod/asyncio/*.py
+    files shipped to the DOS image — not in scope for this smoke. Test
+    only the C layer.
+    """
+    from uc386.dos_emu import run
+
+    program = (
+        b"import _asyncio\n"
+        b"q = _asyncio.TaskQueue()\n"
+        b"print(type(q).__name__)\n"
+        b"print(q.peek() is None)\n"
+        b"\x04\x04"
+    )
+    res = run(micropython_bin,
+              stdin_bytes=program,
+              timeout_seconds=15.0,
+              instruction_limit=4_000_000_000)
+    assert not res.timed_out, "REPL didn't exit"
+    assert res.error is None, f"dos_emu reported error: {res.error}"
+    assert "TaskQueue" in res.stdout, (
+        f"_asyncio.TaskQueue() didn't return a TaskQueue: {res.stdout!r}"
+    )
+    assert "True" in res.stdout, (
+        f"empty TaskQueue.peek() didn't return None: {res.stdout!r}"
+    )
+
+
+def test_micropython_machine_module(micropython_bin: Path) -> None:
+    """`import machine` should expose `machine.mem8/16/32`, `idle()`, and
+    `Signal`. The main DOS-useful feature is mem8/16/32 — under
+    DOS/32A's flat DS, linear addresses 0..4G are mapped 1:1 so
+    `machine.mem16[0x410]` reads the BIOS data area's equipment-list
+    word (a stable, non-zero value on every PC). Pins:
+        1. module registers (`machine` in builtins).
+        2. machine_mem.c links and the subscript path works.
+        3. idle() is a no-op that returns cleanly (our port glue stub).
+
+    The dos_emu rig doesn't actually populate the BIOS data area (we
+    run a flat .bin in an emulator with no BIOS), so the read returns
+    0; we just assert it didn't crash and produced an integer.
+    """
+    from uc386.dos_emu import run
+
+    program = (
+        b"import machine\n"
+        b"print(type(machine.mem8).__name__)\n"
+        b"print(type(machine.mem16).__name__)\n"
+        b"print(type(machine.mem32).__name__)\n"
+        b"machine.idle()\n"
+        b"print('idle_ok')\n"
+        b"v = machine.mem16[0x410]\n"
+        b"print('mem16:', type(v).__name__)\n"
+        b"\x04\x04"
+    )
+    res = run(micropython_bin,
+              stdin_bytes=program,
+              timeout_seconds=15.0,
+              instruction_limit=4_000_000_000)
+    assert not res.timed_out, "REPL didn't exit"
+    assert res.error is None, f"dos_emu reported error: {res.error}"
+    assert "mem" in res.stdout, (
+        f"machine.mem8/16/32 missing: {res.stdout!r}"
+    )
+    assert "idle_ok" in res.stdout, (
+        f"machine.idle() didn't return: {res.stdout!r}"
+    )
+    assert "mem16: int" in res.stdout, (
+        f"machine.mem16[0x410] didn't produce an int: {res.stdout!r}"
+    )
+
+
 def test_micropython_ssl_load_verify_locations_requires_cadata(micropython_bin: Path) -> None:
     """load_verify_locations() with no cadata raises TypeError — our
     modtls glue requires explicit data (cafile= isn't supported in
