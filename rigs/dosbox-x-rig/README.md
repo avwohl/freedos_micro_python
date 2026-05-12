@@ -22,7 +22,7 @@ real-DOS path:
 | `run.sh`         | Launches DOSBox-X with the config                     |
 | `NE2000.COM`     | Crynwr 11.4.3 packet driver (fetched on first run)    |
 | `ECHOTEST.EXE`   | Printf-only baseline (built from `addons/gnu/echo`)   |
-| `MP.EXE`         | Watcom-bound MicroPython (must be built on Linux)     |
+| `MP.EXE`         | MicroPython binary built via `addons/harness/exe.py`  |
 | `RIG.LOG`        | DOSBox-X session output (created on each run)         |
 
 ## Quick check (no MP.EXE needed)
@@ -51,21 +51,20 @@ signature.
 
 ## Full run (with MP.EXE)
 
-`MP.EXE` is the Watcom-linked MicroPython binary produced by
-`addons/harness/exe.py`. Open Watcom doesn't have a macOS build,
-so the `.exe` step has to happen on Linux:
+`MP.EXE` is the MicroPython binary produced by `addons/harness/exe.py`.
+The harness uses Open Watcom's `wlink` when available, and falls back
+to the bundled pure-Python `pyle` linker when it isn't (so the build
+works on macOS too):
 
 ```sh
-# On a Linux dev box (or a CI runner):
 cd /path/to/uc386
 python -m addons.harness.exe \
-    addons/gnu/micropython/build/micropython.bin \
+    addons/gnu/micropython/build/micropython.asm \
     -o addons/gnu/micropython/dosbox-x-rig/MP.EXE
 ```
 
-Then copy the `.exe` back to the Mac and re-run `./run.sh`. The
-log will continue past the "MP.EXE not found" branch into the
-MicroPython REPL banner + DHCP exchange.
+Re-run `./run.sh` and the log will continue past the "MP.EXE not
+found" branch into the MicroPython REPL banner + DHCP exchange.
 
 ## How DOSBox-X's SLIRP matches dos_emu_netsim
 
