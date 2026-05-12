@@ -45,7 +45,8 @@ extern unsigned char pktdrv_int_invoke(unsigned int int_num,
 static const unsigned char PKT_SIG[8] = "PKT DRVR";
 
 static int pktdrv_int_num   = 0;   // 0 = not detected
-static int pktdrv_handle    = -1;  // access_type result
+static int pktdrv_handle    = -1;  // access_type result (IPv4)
+static int pktdrv_handle_arp = -1; // second access_type for ARP (0x0806)
 static unsigned char pktdrv_mac_cache[6];
 
 // RX ring: the receiver callback is split into TWO calls per packet
@@ -794,23 +795,24 @@ static void _diag_hex32(const char *tag, unsigned int val) {
     write(1, out, 15);
 }
 
-static int pktdrv_access(unsigned int linear_receiver) {
+// Register `linear_receiver` as the packet handler for the
+// ethertype at thunk[type_off..type_off+1].  Returns 0 on success
+// and stores the assigned handle into *out_handle.  Called twice
+// during pktdrv_init: once for IPv4 (so DHCP / TCP / UDP frames
+// reach us) and once for ARP (so a static-IP TCP client can
+// resolve the gateway's MAC).  Without the second registration,
+// ARP replies are silently filtered by Crynwr and lwIP retries
+// ARP indefinitely while never sending the SYN.
+static int pktdrv_access_one(unsigned int linear_receiver,
+                              unsigned int type_off,
+                              int *out_handle) {
     extern int write(int fd, const void *buf, unsigned int n);
     if (pktdrv_int_num == 0) {
         return -1;
     }
     static pktdrv_rmcs_t rm;
     rm.edi = linear_receiver & 0xFFFF;     // offset (receiver real-mode IP)
-    // DS:SI = real-mode pointer to type bytes (thunk paragraph, off 6 = IPv4).
-    // We register the IPv4 ethertype (0x0800) rather than ARP (0x0806)
-    // because DHCP OFFER replies come back as UDP/IP -- the slirp/qemu
-    // DHCP server doesn't need to ARP us first, it sends OFFER straight
-    // to the broadcast.  ARP-only registration silently drops every
-    // DHCP reply.  ARP can be added as a second access_type handle if
-    // we ever need to reach hosts on a non-trivial L2 (none of our
-    // smoke targets do; slirp/SLIRP both bridge IP without exposing
-    // their gateway MAC).
-    rm.esi = 6;                             // IPv4 type pattern at thunk[6..7]
+    rm.esi = type_off;                      // ethertype pattern at thunk[type_off..]
     rm.ebp = 0; rm.reserved = 0;
     rm.ebx = 0xFFFF;                        // if_type=0xFFFF (any/wildcard)
     rm.edx = 0;                             // if_number=0 (first card)
@@ -854,15 +856,32 @@ static int pktdrv_access(unsigned int linear_receiver) {
         if (carry) {
             return -1;
         }
-        pktdrv_handle = (int)(regs[R_EAX] & 0xFFFF);
+        *out_handle = (int)(regs[R_EAX] & 0xFFFF);
         pktdrv_last_handle = (unsigned int)(regs[R_EAX] & 0xFFFFFFFF);
         return 0;
     }
     if (rm.flags & 1) {
         return -1;
     }
-    pktdrv_handle = (int)(rm.eax & 0xFFFF);
+    *out_handle = (int)(rm.eax & 0xFFFF);
     pktdrv_last_handle = (unsigned int)(rm.eax & 0xFFFFFFFF);
+    return 0;
+}
+
+// Register the receiver for the two ethertypes we care about:
+// IPv4 (DHCP/TCP/UDP payloads) and ARP (gateway MAC resolution).
+// Failure on the IPv4 registration is fatal; ARP failure is logged
+// but does not abort — broadcast-only protocols (DHCP) still work
+// without it, only ARP-requiring static-IP traffic suffers.
+static int pktdrv_access(unsigned int linear_receiver) {
+    extern int write(int fd, const void *buf, unsigned int n);
+    if (pktdrv_access_one(linear_receiver, 6, &pktdrv_handle) != 0) {
+        return -1;
+    }
+    if (pktdrv_access_one(linear_receiver, 4, &pktdrv_handle_arp) != 0) {
+        write(1, "[pi:arp-access-fail]", 20);
+        pktdrv_handle_arp = -1;
+    }
     return 0;
 }
 

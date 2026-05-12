@@ -56,12 +56,23 @@ uint32_t sys_now(void) {
 // startup hook; calling lwip_init() twice would re-init the heap
 // and drop any allocations made between calls, so the guard is
 // load-bearing.
+//
+// Also skip if `netif_list` is already non-NULL — that means
+// `lwip.reset()` (modlwip's `mod_lwip_reset`) has already invoked
+// `lwip_init()` from Python. A second `lwip_init` would call
+// `netif_init()` which unconditionally `netif_add`s the static
+// `loop_netif`; the second add walks the list, finds the
+// previous `&loop_netif` already there, and trips the
+// "netif already added" assert at lwip/src/core/netif.c:412.
 void lwip_uc386dos_init(void) {
     static int initialised = 0;
     if (initialised) {
         return;
     }
     initialised = 1;
+    if (netif_list != NULL) {
+        return;
+    }
     lwip_init();
 }
 #endif

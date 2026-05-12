@@ -116,10 +116,14 @@ AUTOEXEC=$(mktemp)
 {
     printf '@echo off\r\n'
     printf 'CTTY COM1\r\n'
-    printf 'echo === native NE2000 (no Crynwr) ===\r\n'
-    # NOTE: NE2000.COM (Crynwr) is NOT loaded — MP.EXE drives the
-    # NIC directly via PM-native IO port code. This bypasses the
-    # broken DPMI 0x0303 trampoline path on PMODE/W.
+    printf 'echo === tls rig (Crynwr NE2000.COM at INT 0x60) ===\r\n'
+    # Load NE2000.COM (Crynwr packet driver) at INT 0x60 IRQ 9 IO 0x300.
+    # pktdrv_uc386dos.c bypasses DPMI 0x0303 entirely via a real-mode
+    # receiver stub baked into the thunk paragraph, so the DOS/32A
+    # 0x0303 mishandling that motivated the previous "no Crynwr"
+    # comment no longer applies (see netbase rig — same configuration).
+    printf 'NE2000 0x60 9 0x300\r\n'
+    printf 'echo --- pktdrv loaded ---\r\n'
     printf 'MP.EXE\r\n'
     printf 'echo === rig done ===\r\n'
 } > "$AUTOEXEC"
