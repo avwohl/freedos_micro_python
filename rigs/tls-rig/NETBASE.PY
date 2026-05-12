@@ -10,6 +10,9 @@ for i in range(80):
     if ip != '0.0.0.0':
         print('NETBASE: got-ip after', i, 'polls')
         break
+    if i % 10 == 0:
+        inv, p0, p1, h, sg, of = uc386_net.pktdrv_diag()
+        print('NETBASE: poll', i, 'inv=', inv)
     time.sleep_ms(50)
 ip, nm, gw, up, drv = uc386_net.eth_status()
 inv, p0, p1, h, sg, of = uc386_net.pktdrv_diag()
