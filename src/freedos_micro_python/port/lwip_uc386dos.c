@@ -50,10 +50,18 @@ uint32_t sys_now(void) {
 }
 
 #if LWIP_HAVE_LOOPIF
-// One-shot lwIP init. Call from `main()` after mp_init.
-// Loopback netif is auto-added by lwip_init() when LWIP_HAVE_LOOPIF
-// is on, so we just call lwip_init() and we're done.
+// One-shot lwIP init. Idempotent — first call inits the heap +
+// memp pools, subsequent calls no-op. Driven lazily from
+// uc386dos_eth_start() so we don't depend on a port-specific
+// startup hook; calling lwip_init() twice would re-init the heap
+// and drop any allocations made between calls, so the guard is
+// load-bearing.
 void lwip_uc386dos_init(void) {
+    static int initialised = 0;
+    if (initialised) {
+        return;
+    }
+    initialised = 1;
     lwip_init();
 }
 #endif
@@ -168,6 +176,13 @@ int uc386dos_eth_start(int dhcp_start_now) {
     if (uc386dos_eth_active) {
         return 0;
     }
+    // Initialise lwIP's heap + memp pools on first call. The
+    // dedicated lwip_uc386dos_init() wrapper exists for this but
+    // was historically never wired into any startup path; without
+    // it the lwIP free-list is uninitialised and the first
+    // mem_malloc (e.g. inside dhcp_start) walks corrupted block
+    // pointers forever.
+    lwip_uc386dos_init();
     unsigned char mac[6];
     // Try a real Crynwr packet driver first (so the same binary
     // lights up on hardware when one's loaded). Fall back to the

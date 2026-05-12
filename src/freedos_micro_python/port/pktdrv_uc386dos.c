@@ -1107,14 +1107,13 @@ int pktdrv_init(unsigned char mac[6]) {
         write(1, buf, 26);
     }
     pktdrv_register_polling_rx();
-#if !defined(PKTDRV_NO_IRQ_MASK_WORKAROUND)
-    /* DOS/32A workaround: see comment block. Disable for the
-     * cwsdpmi-host experiment via -DPKTDRV_NO_IRQ_MASK_WORKAROUND=1
-     * to test whether the bug also reproduces under CWSDPMI. */
-    extern void         ne2k_outb(unsigned int port, unsigned int val);
-    extern unsigned int ne2k_inb(unsigned int port);
-    ne2k_outb(0xA1, ne2k_inb(0xA1) | 0x0A);
-#endif
+    /* Note: the DOS/32A AH=04 IRQ-during-send GPF workaround is now
+     * a TRANSIENT mask wrapped around the DPMI 0x0301 dispatch in
+     * pktdrv_send (per the original code comment's intent). The
+     * earlier permanent mask installed here used to disable IRQ 9
+     * for the whole program lifetime, which blocked the Crynwr
+     * receive callback entirely — no DHCP, no ARP responses, etc.
+     */
     write(1, "[pi:done]", 9);
     return 0;
 }
@@ -1182,12 +1181,25 @@ int pktdrv_send(const unsigned char *buf, unsigned int len) {
     dpmi[R_ECX] = 0;
     dpmi[R_EDI] = (unsigned int)(unsigned long)&rm;
     unsigned char carry;
+    /* DOS/32A IRQ-during-send GPF workaround: mask slave-PIC IRQs
+     * 9/11 (bits 1/3 of OCW1 at port 0xA1) just for the DPMI 0x0301
+     * dispatch, restore the original mask byte after. The bare INT
+     * 0x60 send via DOS/32A's RM->PM transition GPFs deterministically
+     * when an IRQ fires during the real-mode portion of the call
+     * (reproduced cleanly in rigs/crynwr-send-loop). Masking only for
+     * the duration of dispatch lets RX packets queued in the NIC's
+     * onboard buffer get delivered when Crynwr's handler runs after
+     * the unmask. The previous permanent mask in pktdrv_init blocked
+     * receive entirely. */
+    unsigned int saved_mask = ne2k_inb(0xA1);
+    ne2k_outb(0xA1, saved_mask | 0x0A);
     if (pktdrv_thunk_seg != 0) {
         carry = (unsigned char)(pktdrv_call_int60_thunk(&rm) ? 1 : 0);
         (void)dpmi;
     } else {
         carry = pktdrv_int_invoke(0x31, dpmi);
     }
+    ne2k_outb(0xA1, saved_mask);
     if (carry) {
         write(1, "[ps:dpmi-fail]", 14);
         return -1;
