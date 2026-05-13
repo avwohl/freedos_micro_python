@@ -448,87 +448,49 @@ static int pktdrv_alloc_thunk(void) {
     //   phase 0 returns ES:DI = buffer (or 0:0 to drop)
     //   phase 1 returns nothing
     //
-    // Layout within the 128-byte (8-paragraph) thunk allocation:
-    //   offset 0x10..0x6F = receiver code (96 bytes) — 2-slot ring
-    //   offset 0x70       = pending_a (byte; phase 1 sets, MP clears)
-    //   offset 0x71       = pending_b (byte)
-    //   offset 0x72       = in_use_slot (byte; phase 0 picks A=0/B=1,
-    //                       phase 1 reads to know which pending to set)
-    //   offset 0x74..0x75 = length_a (word; bytes received in slot A)
-    //   offset 0x76..0x77 = length_b
-    //   offset 0x78..0x79 = bounce_seg_a (real-mode segment for slot A)
-    //   offset 0x7A..0x7B = bounce_seg_b
-    //
-    // Why a ring: server's TCP-ACK and server's TLS-Finished frequently
-    // arrive on the wire 200-500us apart at the end of the TLS handshake.
-    // A single-slot bounce buffer fills with ACK#1, Crynwr's next IRQ
-    // (for the Finished payload) sees pending=1 and drops the packet ->
-    // axtls hangs forever waiting for HS_FINISHED bytes that never come.
-    // Two slots give us enough headroom; MP's pump_rx drains each in
-    // turn during the basic_read wait loop.
+    // Layout within the 80-byte (5-paragraph) thunk allocation:
+    //   offset 0x10..0x3F = receiver code (48 bytes)
+    //   offset 0x40       = pending word  (set by phase 1; MP polls)
+    //   offset 0x42       = length word   (set by phase 0)
+    //   offset 0x44       = bounce_seg    (initialised below from
+    //                       pktdrv_bounce_seg; phase 0 reads to
+    //                       return ES:DI = bounce_seg:0)
     //
     // Hand-assembled bytes; see comments for the corresponding x86
     // mnemonics.  The CS: prefix (0x2E) on every memory reference
     // is required because at FAR-CALL entry the only segment
     // register guaranteed to point at our paragraph is CS.
     static const unsigned char rcv_code[] = {
-        // offset 0x10 — entry: dispatch by phase
-        0x09, 0xC0,                              // or  ax, ax
-        0x75, 0x45,                              // jnz .phase1 (to 0x59 = 0x14 + 0x45)
-        // .phase0 at 0x14:
-        0x81, 0xF9, 0xEE, 0x05,                  // cmp cx, 1518
-        0x77, 0x38,                              // ja  .drop (to 0x52 = 0x1A + 0x38)
-        // try slot A at 0x1A:
-        0x2E, 0x80, 0x3E, 0x70, 0x00, 0x00,      // cmp byte [cs:0x70], 0
-        0x75, 0x14,                              // jne .try_b (to 0x36)
-        0x2E, 0x89, 0x0E, 0x74, 0x00,            // mov [cs:0x74], cx (length_a)
-        0x2E, 0xA1, 0x78, 0x00,                  // mov ax, [cs:0x78] (bounce_seg_a)
-        0x8E, 0xC0,                              // mov es, ax
-        0x31, 0xFF,                              // xor di, di
-        0x2E, 0xC6, 0x06, 0x72, 0x00, 0x00,      // mov byte [cs:0x72], 0 (in_use=A)
-        0xCB,                                    // retf
-        // .try_b at 0x36:
-        0x2E, 0x80, 0x3E, 0x71, 0x00, 0x00,      // cmp byte [cs:0x71], 0
-        0x75, 0x14,                              // jne .drop (to 0x52)
-        0x2E, 0x89, 0x0E, 0x76, 0x00,            // mov [cs:0x76], cx (length_b)
-        0x2E, 0xA1, 0x7A, 0x00,                  // mov ax, [cs:0x7A] (bounce_seg_b)
-        0x8E, 0xC0,                              // mov es, ax
-        0x31, 0xFF,                              // xor di, di
-        0x2E, 0xC6, 0x06, 0x72, 0x00, 0x01,      // mov byte [cs:0x72], 1 (in_use=B)
-        0xCB,                                    // retf
-        // .drop at 0x52:
-        0x31, 0xC0,                              // xor ax, ax
-        0x8E, 0xC0,                              // mov es, ax
-        0x31, 0xFF,                              // xor di, di
-        0xCB,                                    // retf
-        // .phase1 at 0x59 — read in_use_slot, set matching pending:
-        0x2E, 0x80, 0x3E, 0x72, 0x00, 0x00,      // cmp byte [cs:0x72], 0
-        0x75, 0x07,                              // jne .p1_b (to 0x68)
-        0x2E, 0xC6, 0x06, 0x70, 0x00, 0x01,      // mov byte [cs:0x70], 1
-        0xCB,                                    // retf
-        // .p1_b at 0x68:
-        0x2E, 0xC6, 0x06, 0x71, 0x00, 0x01,      // mov byte [cs:0x71], 1
-        0xCB,                                    // retf
+        0x09, 0xC0,                      // or  ax, ax
+        0x75, 0x23,                      // jnz .phase1 (to off 0x37)
+        0x2E, 0x83, 0x3E, 0x40, 0x00, 0x00,  // cmp word [cs:0x40], 0
+        0x75, 0x14,                      // jnz .drop (to off 0x30)
+        0x81, 0xF9, 0xEE, 0x05,          // cmp cx, 1518
+        0x77, 0x0E,                      // ja  .drop (to off 0x30)
+        0x2E, 0x89, 0x0E, 0x42, 0x00,    // mov [cs:0x42], cx
+        0x2E, 0xA1, 0x44, 0x00,          // mov ax, [cs:0x44]
+        0x8E, 0xC0,                      // mov es, ax
+        0x31, 0xFF,                      // xor di, di
+        0xCB,                            // retf
+        // .drop at offset 0x30:
+        0x31, 0xC0,                      // xor ax, ax
+        0x8E, 0xC0,                      // mov es, ax
+        0x31, 0xFF,                      // xor di, di
+        0xCB,                            // retf
+        // .phase1 at offset 0x37:
+        0x2E, 0xC7, 0x06, 0x40, 0x00, 0x01, 0x00,  // mov word [cs:0x40], 1
+        0xCB,                            // retf
     };
     for (unsigned int i = 0; i < sizeof(rcv_code); i++) {
         thunk[0x10 + i] = rcv_code[i];
     }
-    // Per-slot state at offsets 0x70..0x7B (well past the stub at
-    // 0x10..0x6F).  Slot B's bounce segment is 96 paragraphs (1536
-    // bytes) past slot A so a max-sized 1518-byte frame in A cannot
-    // overrun into B's storage.
-    unsigned int bounce_a = pktdrv_bounce_seg;
-    unsigned int bounce_b = pktdrv_bounce_seg + 96;
-    thunk[0x70] = 0;             // pending_a
-    thunk[0x71] = 0;             // pending_b
-    thunk[0x72] = 0;             // in_use_slot
-    thunk[0x73] = 0;             // pad
-    thunk[0x74] = 0; thunk[0x75] = 0;   // length_a
-    thunk[0x76] = 0; thunk[0x77] = 0;   // length_b
-    thunk[0x78] = (unsigned char)(bounce_a & 0xFF);
-    thunk[0x79] = (unsigned char)((bounce_a >> 8) & 0xFF);
-    thunk[0x7A] = (unsigned char)(bounce_b & 0xFF);
-    thunk[0x7B] = (unsigned char)((bounce_b >> 8) & 0xFF);
+    // pending, length cleared to zero; bounce_seg initialised below
+    // (set to pktdrv_bounce_seg if alloc succeeded, else 0 -- which
+    // makes phase 0 drop everything since ES:DI = 0:0).
+    thunk[0x40] = 0; thunk[0x41] = 0;
+    thunk[0x42] = 0; thunk[0x43] = 0;
+    thunk[0x44] = (unsigned char)(pktdrv_bounce_seg & 0xFF);
+    thunk[0x45] = (unsigned char)((pktdrv_bounce_seg >> 8) & 0xFF);
     pktdrv_thunk_seg = seg;
     // Dump thunk content (16 bytes) as 4 dwords for verification.
     _diag_hex32("tk03", ((unsigned int)thunk[0]<<24)
@@ -1391,45 +1353,33 @@ int pktdrv_send(const unsigned char *buf, unsigned int len) {
     return 0;
 }
 
-// Real-mode receiver-stub drain (2-slot ring). The stub at thunk[0x10]
-// fills either slot A (thunk[0x64] length, thunk[0x68] bounce_seg) or
-// slot B (thunk[0x66], thunk[0x6A]) on each Crynwr phase-0/1 pair,
-// setting thunk[0x60] (pending_a) or thunk[0x61] (pending_b) when done.
-// We round-robin which slot to drain first so neither side starves.
+// Drain the RX slot if one is pending. Returns the byte count
+// written (clamped to maxlen) or 0 if nothing's queued. Truncates
+// silently on overflow.
+// Real-mode receiver-stub drain: if Crynwr's IRQ handler has filled
+// the bounce buffer (stub's pending word at thunk[0x40] is set), copy
+// it into pktdrv_rx_buf, clear the stub's pending, and set
+// pktdrv_rx_pending so pktdrv_recv picks it up below.
 static void pktdrv_poll_rmstub(void) {
     if (pktdrv_thunk_seg == 0) return;
     if (pktdrv_rx_pending != 0) return;   // MP hasn't consumed last frame
     unsigned int thunk_lin = (unsigned int)pktdrv_thunk_seg << 4;
-    volatile unsigned char  *pending_a = (volatile unsigned char  *)(unsigned long)(thunk_lin + 0x70);
-    volatile unsigned char  *pending_b = (volatile unsigned char  *)(unsigned long)(thunk_lin + 0x71);
-    volatile unsigned short *length_a  = (volatile unsigned short *)(unsigned long)(thunk_lin + 0x74);
-    volatile unsigned short *length_b  = (volatile unsigned short *)(unsigned long)(thunk_lin + 0x76);
-
-    static int prefer_b = 0;
-    volatile unsigned char  *p_pend; volatile unsigned short *p_len;
-    unsigned int p_linear;
-    if (prefer_b) {
-        if (*pending_b)      { p_pend = pending_b; p_len = length_b; p_linear = pktdrv_bounce_linear + 96 * 16; }
-        else if (*pending_a) { p_pend = pending_a; p_len = length_a; p_linear = pktdrv_bounce_linear; }
-        else return;
-    } else {
-        if (*pending_a)      { p_pend = pending_a; p_len = length_a; p_linear = pktdrv_bounce_linear; }
-        else if (*pending_b) { p_pend = pending_b; p_len = length_b; p_linear = pktdrv_bounce_linear + 96 * 16; }
-        else return;
-    }
-    prefer_b ^= 1;
-
-    unsigned int n = *p_len;
+    volatile unsigned short *st_pending =
+        (volatile unsigned short *)(unsigned long)(thunk_lin + 0x40);
+    volatile unsigned short *st_length  =
+        (volatile unsigned short *)(unsigned long)(thunk_lin + 0x42);
+    if (*st_pending == 0) return;
+    unsigned int n = *st_length;
     if (n == 0 || n > sizeof(pktdrv_rx_buf)) {
-        *p_pend = 0;
+        *st_pending = 0;   // discard bogus length
         return;
     }
-    if (p_linear != 0) {
+    if (pktdrv_bounce_linear != 0) {
         memcpy(pktdrv_rx_buf,
-               (const unsigned char *)(unsigned long)p_linear, n);
+               (const unsigned char *)(unsigned long)pktdrv_bounce_linear, n);
     }
     pktdrv_rx_len = n;
-    *p_pend = 0;
+    *st_pending = 0;
     pktdrv_rx_pending = 1;
 }
 
