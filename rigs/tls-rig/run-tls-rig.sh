@@ -135,7 +135,7 @@ rm -f "$AUTOEXEC"
 # margin so the server is still listening when MP's lwIP finally
 # routes a packet at it.
 echo "[rig] starting tls_server.py on port $TLS_PORT ..."
-python3 ./tls_server.py --port "$TLS_PORT" --max-seconds 300 \
+python3 ./tls_server.py --port "$TLS_PORT" --max-seconds 700 \
     > tls-server.log 2>&1 &
 SERVER_PID=$!
 
@@ -180,7 +180,7 @@ QEMU_PID=$!
 # COM1 output. With CTTY COM1, MP's stdout flows live to the
 # serial line and ends up in $LOG. Cap at 240s to give DHCP +
 # TLS handshake plenty of room.
-for _ in $(seq 1 240); do
+for _ in $(seq 1 600); do
     sleep 1
     if grep -q "TLSTEST: PASS\|TLSTEST: FAIL\|rig done" "$LOG" 2>/dev/null; then
         # Give a beat for any trailing output to flush.

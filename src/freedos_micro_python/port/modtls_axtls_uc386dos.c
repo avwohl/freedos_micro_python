@@ -113,8 +113,18 @@ static mp_obj_t ssl_context_make_new(const mp_obj_type_t *type_in, size_t n_args
     #else
     mp_obj_ssl_context_t *self = mp_obj_malloc(mp_obj_ssl_context_t, type_in);
     #endif
-    self->key = mp_const_none;
-    self->cert = mp_const_none;
+    // uc386 codegen bug workaround: writing a non-zero compile-time
+    // constant directly to a struct field (e.g. `self->key = mp_const_none`)
+    // emits `mov eax, 6; mov [eax+4], eax` — uc386 reuses the
+    // constant's register as the base address.  Self->key/cert end up
+    // uninitialised, then wrap_socket's `if (key != mp_const_none)`
+    // takes the wrong branch and dereferences a null mp_obj.  Routing
+    // the assignment through a local mp_obj_t forces uc386 to load
+    // `self` into a separate register, so the store targets the right
+    // address.  See networking_targets.md.
+    mp_obj_t none_val = mp_const_none;
+    self->key = none_val;
+    self->cert = none_val;
     self->verify_mode = CERT_NONE;
 
     // We allocate the SSL_CTX up front so load_verify_locations /
