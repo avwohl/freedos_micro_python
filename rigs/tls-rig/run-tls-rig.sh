@@ -179,10 +179,16 @@ QEMU_PID=$!
 # Watch for the success marker (or rig-done from autoexec) in
 # COM1 output. With CTTY COM1, MP's stdout flows live to the
 # serial line and ends up in $LOG. Cap at 240s to give DHCP +
-# TLS handshake plenty of room.
+# TLS handshake plenty of room.  Anchor PASS/FAIL to column 0 (with
+# optional trailing CR for DOS line endings).  Without the ^ anchor,
+# paste-mode echoes back the indented `print('TLSTEST: FAIL...')`
+# branches inside `else:` blocks as the script ingests, and a bare
+# `TLSTEST: FAIL` substring match terminates QEMU before MP has even
+# finished printing the post-handshake markers.  `rig done` stays
+# unanchored — autoexec.bat emits it from column 0.
 for _ in $(seq 1 600); do
     sleep 1
-    if grep -q "TLSTEST: PASS\|TLSTEST: FAIL\|rig done" "$LOG" 2>/dev/null; then
+    if grep -qE $'(^TLSTEST: (PASS|FAIL)\r?$|rig done)' "$LOG" 2>/dev/null; then
         # Give a beat for any trailing output to flush.
         sleep 2
         break

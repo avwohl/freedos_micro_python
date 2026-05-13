@@ -333,6 +333,16 @@ static mp_uint_t ssl_socket_read(mp_obj_t o_in, void *buf, mp_uint_t size, int *
         mp_int_t r = ssl_read(o->ssl_sock, &o->buf);
         if (r == SSL_OK) {
             if (o->blocking) {
+                // axtls's basic_read returns SSL_OK between SOCKET_READ
+                // calls (e.g. after reading a 5-byte record header, it
+                // needs another recv for the body). Without an explicit
+                // RX pump here, the loop spins through ssl_read which
+                // does a single SOCKET_READ that finds lwIP's pbuf
+                // already drained, sees no new data, and returns SSL_OK
+                // forever. The non-blocking variant works because Python
+                // calls lwip.callback() between iterations. Mirror that
+                // pump here so blocking reads see new packets too.
+                MICROPY_PY_LWIP_POLL_HOOK
                 continue;
             } else {
                 goto eagain;

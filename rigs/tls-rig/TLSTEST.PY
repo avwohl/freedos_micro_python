@@ -70,11 +70,14 @@ print('TLSTEST: pre_read')
 _rbuf = bytearray(64)
 _n = tls.readinto(_rbuf)
 print('TLSTEST: post_read')
-data = bytes(_rbuf[:_n]) if _n else b''
 print('TLSTEST: data_len', _n)
-if data and b'TLS_RIG_OK' in data:
+# Skip bytearray slicing — `bytes(_rbuf[0:n])` raises IndexError on
+# uc386 MP even with valid bounds (likely a uc386 codegen bug in the
+# slice → __getitem__ → m_new path).  The substring check works
+# directly on the full 64-byte buffer; the unused tail is the
+# zero-padding from `bytearray(64)`, which can't false-match the
+# ASCII marker.
+if _n is not None and _n > 0 and b'TLS_RIG_OK' in _rbuf:
     print('TLSTEST: PASS')
 else:
-    print('TLSTEST: FAIL_unexpected_response')
-    if data:
-        print('TLSTEST: got_bytes', data[:32])
+    print('TLSTEST: FAIL_unexpected_response n=', _n)
