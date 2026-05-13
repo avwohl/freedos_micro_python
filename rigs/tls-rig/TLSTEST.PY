@@ -60,9 +60,18 @@ except OSError as e:
 print('TLSTEST: handshake_ok')
 _ = tls.write(b'hi-from-uc386')
 print('TLSTEST: pre_read')
-data = tls.read(64)
+# Use readinto into a preallocated bytearray rather than tls.read(N)
+# — readinto bypasses stream_read_generic's mp_obj_new_bytes_from_vstr
+# path. (That distinction was ruled out as the hang source on
+# 2026-05-13: both read() and readinto() hang at the same point
+# inside the ssl_socket_read → ssl_read decrypt loop. A no-read
+# control variant — handshake + write + PASS — runs to completion
+# and MP cleanly deinits, confirming the bug is read-path-only.)
+_rbuf = bytearray(64)
+_n = tls.readinto(_rbuf)
 print('TLSTEST: post_read')
-print('TLSTEST: data_len', len(data) if data else 'NONE')
+data = bytes(_rbuf[:_n]) if _n else b''
+print('TLSTEST: data_len', _n)
 if data and b'TLS_RIG_OK' in data:
     print('TLSTEST: PASS')
 else:

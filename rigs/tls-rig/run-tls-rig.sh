@@ -209,8 +209,10 @@ echo "=== Result ==="
 # source-code echoes paste-mode mirrors back to the serial line
 # as it ingests the script — those lines are indented inside
 # `if/for/with` blocks and would false-positive any non-anchored
-# grep.
-if grep -qE '^TLSTEST: PASS$' "$LOG" 2>/dev/null; then
+# grep. The \r? tolerates DOS CR-LF line endings (CTTY COM1 emits
+# CR-LF; without \r?, MP's actual PASS print never matches and the
+# rig reports FAIL even when MP cleanly printed TLSTEST: PASS).
+if grep -qE $'^TLSTEST: PASS\r?$' "$LOG" 2>/dev/null; then
     echo "PASS: end-to-end TLS handshake completed; uc386 MP read decrypted bytes from the host TLS server."
     exit 0
 fi
