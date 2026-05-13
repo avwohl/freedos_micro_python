@@ -59,9 +59,13 @@ except OSError as e:
     sys.exit(3)
 print('TLSTEST: handshake_ok')
 _ = tls.write(b'hi-from-uc386')
+print('TLSTEST: pre_read')
 data = tls.read(64)
-print('TLSTEST: received', data)
-if b'TLS_RIG_OK' in data:
+print('TLSTEST: post_read')
+print('TLSTEST: data_len', len(data) if data else 'NONE')
+if data and b'TLS_RIG_OK' in data:
     print('TLSTEST: PASS')
 else:
     print('TLSTEST: FAIL_unexpected_response')
+    if data:
+        print('TLSTEST: got_bytes', data[:32])
