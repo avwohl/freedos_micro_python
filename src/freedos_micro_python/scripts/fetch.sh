@@ -367,6 +367,42 @@ patch_axtls_endian_include() {
     rm -f "$F.bak"
 }
 
+# axtls's `get_random` (upstream/lib/axtls/crypto/crypto_misc.c) calls
+# `gettimeofday(&tv, NULL)` on the non-Linux/non-Windows fallback path.
+# Under FreeDOS+DOS/32A, the first call works but the second-and-later
+# calls hit an INT 21h re-entrancy hang inside the AH=0x2A handler.
+# The hang surfaces during the TLS handshake (the call from
+# `send_client_key_xchg` hangs DOS).  Patch out the gettimeofday call
+# and seed `tv` from a self-incrementing 64-bit counter instead.  The
+# RNG output is only used for one-shot per-session secrets
+# (pre-master, ClientHello random) — not long-lived key material —
+# so the weaker entropy is acceptable for this port.  Idempotent.
+patch_axtls_get_random_dos_int21() {
+    F="upstream/lib/axtls/crypto/crypto_misc.c"
+    if [ ! -f "$F" ]; then return 0; fi
+    if grep -q "uc386-dos: skip gettimeofday" "$F"; then
+        return 0
+    fi
+    if ! grep -q "gettimeofday(&tv, NULL);" "$F"; then
+        echo "micropython: warn: crypto_misc.c shape changed — skipping gettimeofday patch." >&2
+        return 0
+    fi
+    echo "micropython: patching axtls get_random to skip INT 21h gettimeofday …"
+    awk '
+        /gettimeofday\(&tv, NULL\);/ {
+            print "    /* uc386-dos: skip gettimeofday() — see fetch.sh */"
+            print "    {"
+            print "        static unsigned long _rng_counter = 0;"
+            print "        _rng_counter += 0x9E3779B97F4A7C15UL;"
+            print "        tv.tv_sec = (long)(_rng_counter & 0x7FFFFFFFUL);"
+            print "        tv.tv_usec = (long)((_rng_counter >> 16) & 0x7FFFFFFFUL);"
+            print "    }"
+            next
+        }
+        { print }
+    ' "$F" > "$F.tmp" && mv "$F.tmp" "$F"
+}
+
 if [ -d upstream ]; then
     echo "micropython: upstream/ already present — skipping main fetch."
     fetch_b_con_crypto
@@ -378,6 +414,7 @@ if [ -d upstream ]; then
     patch_main_disable_fs_stubs
     patch_axtls_config_verify
     patch_axtls_endian_include
+    patch_axtls_get_random_dos_int21
     exit 0
 fi
 
@@ -406,3 +443,4 @@ patch_main_pktdrv_prealloc
 patch_main_disable_fs_stubs
 patch_axtls_config_verify
 patch_axtls_endian_include
+patch_axtls_get_random_dos_int21
