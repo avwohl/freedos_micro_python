@@ -150,6 +150,133 @@ def test_build_request_custom_headers(wget_module):
 # ---- embedded MicroPython smoke ----------------------------------
 
 
+# ---- host-side end-to-end with cert verification ------------------
+
+
+@pytest.fixture(scope="module")
+def https_rig(tmp_path_factory) -> dict:
+    """Spin up the rigs' tls_server.py in HTTP-response mode against
+    a fresh self-signed cert + CA. Yields a dict with `url`,
+    `ca_pem` (path), and `body` (the bytes the server will serve)."""
+    import subprocess
+    import threading
+    import time
+
+    tmp = tmp_path_factory.mktemp("https_rig")
+    cert = tmp / "cert.pem"
+    key = tmp / "key.pem"
+    ca = tmp / "ca.pem"
+    body_file = tmp / "body.bin"
+    body = b"WGET_RIG_OK\n" + bytes((i % 251) for i in range(256))
+    body_file.write_bytes(body)
+
+    # Self-signed cert with SAN IP=127.0.0.1.
+    subprocess.run(
+        ["openssl", "req", "-x509", "-nodes", "-newkey", "rsa:2048",
+         "-subj", "/CN=uc386-wget-rig",
+         "-addext", "subjectAltName=IP:127.0.0.1",
+         "-days", "30",
+         "-keyout", str(key), "-out", str(cert)],
+        check=True, capture_output=True,
+    )
+    # The self-signed cert is its own CA root.
+    ca.write_bytes(cert.read_bytes())
+
+    # Pick an ephemeral port.
+    import socket as _s
+    probe = _s.socket()
+    probe.bind(("127.0.0.1", 0))
+    port = probe.getsockname()[1]
+    probe.close()
+
+    server_script = _HERE.parent / "rigs" / "tls-rig" / "tls_server.py"
+    proc = subprocess.Popen(
+        [sys.executable, str(server_script),
+         "--port", str(port),
+         "--cert", str(cert),
+         "--key", str(key),
+         "--max-seconds", "30",
+         "--http-body-file", str(body_file),
+         "--http-path", "/wget.bin",
+         # Client here is host CPython, not axtls — let TLS
+         # negotiate to a modern protocol (CPython rejects
+         # TLSv1.0 at the default security level).
+         "--no-axtls-compat"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    # Wait for the listen-banner line.
+    deadline = time.time() + 5.0
+    while time.time() < deadline:
+        line = proc.stdout.readline()
+        if b"listening" in line:
+            break
+    else:
+        proc.kill()
+        pytest.skip("tls_server didn't come up in time")
+
+    yield {
+        "url": f"https://127.0.0.1:{port}/wget.bin",
+        "ca_pem": ca,
+        "body": body,
+    }
+
+    try:
+        proc.kill()
+        proc.wait(timeout=2)
+    except Exception:
+        pass
+
+
+def test_fetch_with_cert_verify_round_trip(
+    wget_module, https_rig, tmp_path,
+) -> None:
+    """Real HTTPS fetch through wget.fetch with
+    verify_mode=CERT_REQUIRED + the rig's self-signed CA loaded
+    via load_verify_locations(cadata=...). The downloaded body
+    must match the bytes the server served."""
+    out = tmp_path / "downloaded.bin"
+    status, n, path = wget_module.fetch(
+        https_rig["url"],
+        out=str(out),
+        verify=True,
+        ca_certs=str(https_rig["ca_pem"]),
+    )
+    assert status == 200
+    assert n == len(https_rig["body"])
+    assert out.read_bytes() == https_rig["body"]
+
+
+def test_fetch_verify_rejects_unknown_ca(
+    wget_module, https_rig, tmp_path,
+) -> None:
+    """Pointing verify at a CA bundle that DIDN'T sign the
+    server's cert must raise — proves the verification gate
+    actually gates rather than silently letting handshakes
+    succeed against arbitrary peers."""
+    import subprocess
+    bad_cert = tmp_path / "bad.pem"
+    bad_key = tmp_path / "bad.key"
+    subprocess.run(
+        ["openssl", "req", "-x509", "-nodes", "-newkey", "rsa:2048",
+         "-subj", "/CN=not-the-rig", "-days", "1",
+         "-keyout", str(bad_key), "-out", str(bad_cert)],
+        check=True, capture_output=True,
+    )
+    out = tmp_path / "should-not-exist.bin"
+    with pytest.raises(Exception):
+        # Any of OSError, ssl.SSLError, ConnectionResetError —
+        # the point is the call doesn't return success.
+        wget_module.fetch(
+            https_rig["url"],
+            out=str(out),
+            verify=True,
+            ca_certs=str(bad_cert),
+        )
+
+
+# ---- embedded MicroPython smoke ----------------------------------
+
+
 def test_wget_runs_under_micropython(micropython_bin: Path) -> None:
     """Paste wget.py into the uc386-dos REPL and run the same
     parser probes. Confirms `import socket`, `import ssl`, and the

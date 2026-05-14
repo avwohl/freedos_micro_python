@@ -96,7 +96,20 @@ def _connect(scheme, host, port, *, verify, ca_certs):
         ctx.verify_mode = _ssl.CERT_REQUIRED
         if ca_certs is not None:
             with open(ca_certs, "rb") as f:
-                ctx.load_verify_locations(cadata=f.read())
+                cadata = f.read()
+            # MP/axtls's `load_verify_locations(cadata=...)` accepts
+            # raw PEM bytes. Host CPython treats `cadata=bytes` as
+            # DER-encoded and `cadata=str` as PEM; route by content
+            # so the same wget call works on either side.
+            if b"-----BEGIN" in cadata:
+                try:
+                    ctx.load_verify_locations(cadata=cadata.decode("ascii"))
+                except (TypeError, ValueError):
+                    # MP's axtls signature only takes positional /
+                    # bytes — fall back to the bytes form.
+                    ctx.load_verify_locations(cadata=cadata)
+            else:
+                ctx.load_verify_locations(cadata=cadata)
     else:
         ctx.verify_mode = _ssl.CERT_NONE
     # axtls accepts but ignores `server_hostname`; pass it so the

@@ -23,7 +23,21 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 
 
-def serve_one(port: int, cert: Path, key: Path, *, max_seconds: float = 60.0) -> int:
+def serve_one(port: int, cert: Path, key: Path, *,
+              max_seconds: float = 60.0,
+              http_body: bytes | None = None,
+              http_path: str = "/",
+              axtls_compat: bool = True) -> int:
+    """Accept one TLS connection. Two response modes:
+
+    - Default (raw echo): expects a small request from the client,
+      replies with ``b"TLS_RIG_OK " + request + b"\\n"``.
+
+    - ``http_body=<bytes>``: parses an HTTP/1.x GET, returns an
+      HTTP/1.0 response with that body (200 OK if the request line
+      matches ``http_path``, 404 otherwise). Used by the wget rig
+      to drive the MP client's HTTP-over-TLS code path end-to-end
+      while still exercising cert verification."""
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.load_cert_chain(certfile=str(cert), keyfile=str(key))
     # axtls speaks TLSv1.0 only (CONFIG_SSL_PROT_LOW), with RSA-AES-CBC
@@ -33,16 +47,17 @@ def serve_one(port: int, cert: Path, key: Path, *, max_seconds: float = 60.0) ->
     # RSA on OpenSSL 1.1+; LibreSSL ignores the suffix harmlessly.
     # Safe in this rig — the only client is uc386 axtls, and we
     # generate a fresh self-signed key per run.
-    try:
-        ctx.minimum_version = ssl.TLSVersion.TLSv1
-        ctx.maximum_version = ssl.TLSVersion.TLSv1
-    except AttributeError:
-        pass  # older Pythons
-    try:
-        ctx.set_ciphers("AES128-SHA:AES256-SHA:@SECLEVEL=0")
-    except ssl.SSLError:
-        # LibreSSL doesn't grok @SECLEVEL — try without.
-        ctx.set_ciphers("AES128-SHA:AES256-SHA")
+    if axtls_compat:
+        try:
+            ctx.minimum_version = ssl.TLSVersion.TLSv1
+            ctx.maximum_version = ssl.TLSVersion.TLSv1
+        except AttributeError:
+            pass  # older Pythons
+        try:
+            ctx.set_ciphers("AES128-SHA:AES256-SHA:@SECLEVEL=0")
+        except ssl.SSLError:
+            # LibreSSL doesn't grok @SECLEVEL — try without.
+            ctx.set_ciphers("AES128-SHA:AES256-SHA")
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -67,16 +82,52 @@ def serve_one(port: int, cert: Path, key: Path, *, max_seconds: float = 60.0) ->
         return 2
     print(f"[tls-server] handshake ok, cipher={tls.cipher()}", flush=True)
 
-    try:
-        data = tls.read(64)
-    except (ssl.SSLError, socket.timeout) as e:
-        print(f"[tls-server] read failed: {e}", flush=True)
-        tls.close()
-        return 3
+    if http_body is not None:
+        # HTTP mode: read until the request's header terminator.
+        req = bytearray()
+        while b"\r\n\r\n" not in req and len(req) < 8192:
+            try:
+                chunk = tls.read(512)
+            except (ssl.SSLError, socket.timeout) as e:
+                print(f"[tls-server] read failed: {e}", flush=True)
+                tls.close()
+                return 3
+            if not chunk:
+                break
+            req.extend(chunk)
+        # Parse the request line — `GET <path> HTTP/<v>`.
+        line = bytes(req).split(b"\r\n", 1)[0].decode("ascii", "replace")
+        parts = line.split(" ", 2)
+        req_path = parts[1] if len(parts) >= 2 else ""
+        print(f"[tls-server] http request: {line!r}", flush=True)
+        if req_path == http_path:
+            status = b"HTTP/1.0 200 OK"
+            body = http_body
+        else:
+            status = b"HTTP/1.0 404 Not Found"
+            body = b"not found\n"
+        resp = (
+            status + b"\r\n"
+            + b"Content-Length: " + str(len(body)).encode("ascii") + b"\r\n"
+            + b"Content-Type: application/octet-stream\r\n"
+            + b"Connection: close\r\n"
+            + b"\r\n"
+            + body
+        )
+        tls.write(resp)
+        print(f"[tls-server] sent {len(resp)} bytes ({status.decode()})",
+              flush=True)
+    else:
+        try:
+            data = tls.read(64)
+        except (ssl.SSLError, socket.timeout) as e:
+            print(f"[tls-server] read failed: {e}", flush=True)
+            tls.close()
+            return 3
 
-    msg = b"TLS_RIG_OK " + data + b"\n"
-    tls.write(msg)
-    print(f"[tls-server] sent {msg!r}", flush=True)
+        msg = b"TLS_RIG_OK " + data + b"\n"
+        tls.write(msg)
+        print(f"[tls-server] sent {msg!r}", flush=True)
 
     try:
         tls.close()
@@ -92,8 +143,37 @@ def main() -> int:
     ap.add_argument("--cert", type=Path, default=HERE / "test-server.crt")
     ap.add_argument("--key", type=Path, default=HERE / "test-server.key")
     ap.add_argument("--max-seconds", type=float, default=60.0)
+    ap.add_argument(
+        "--http-body-file",
+        type=Path,
+        default=None,
+        help=("Switch to HTTP-response mode and serve this file's bytes as "
+              "the 200 OK body. Without this the server runs the raw "
+              "echo (`TLS_RIG_OK <data>`) used by TLSTEST.PY."),
+    )
+    ap.add_argument(
+        "--http-path",
+        default="/",
+        help="Request path that returns 200 OK (others return 404).",
+    )
+    ap.add_argument(
+        "--no-axtls-compat", action="store_true",
+        help=("Drop the TLSv1.0-only + RSA-AES-CBC cipher gate. The "
+              "axtls client in MP only speaks TLSv1.0 with those "
+              "ciphers, so the gate is on by default; turn off when "
+              "the client is host CPython (which rejects TLSv1.0)."),
+    )
     args = ap.parse_args()
-    return serve_one(args.port, args.cert, args.key, max_seconds=args.max_seconds)
+    http_body = (
+        args.http_body_file.read_bytes()
+        if args.http_body_file is not None else None
+    )
+    return serve_one(
+        args.port, args.cert, args.key,
+        max_seconds=args.max_seconds,
+        http_body=http_body, http_path=args.http_path,
+        axtls_compat=not args.no_axtls_compat,
+    )
 
 
 if __name__ == "__main__":
