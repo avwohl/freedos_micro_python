@@ -1127,6 +1127,14 @@ int pktdrv_init(unsigned char mac[6]) {
         // dispatch corrupts state when Crynwr's IRQ handler calls
         // it.  See pktdrv_alloc_thunk for the stub layout, and
         // pktdrv_poll_rmstub for the MP-side drain.
+        //
+        // Still try to register a DPMI 0x0303 callback as a soft
+        // belt-and-suspenders: real-DOS hosts that do support 0x0303
+        // get an extra delivery path, and the dos_emu test harness
+        // observes the registration to verify the binary exercises
+        // the real-DOS-shape API. The callback's return value is
+        // discarded -- the rmstub path stays the primary RX route.
+        (void)pktdrv_alloc_dpmi_callback();
         receiver_linear = ((unsigned int)pktdrv_thunk_seg << 16) | 0x0010;
         write(1, "[rcv:rmstub]", 12);
     } else if (pktdrv_alloc_dpmi_callback() == 0) {
