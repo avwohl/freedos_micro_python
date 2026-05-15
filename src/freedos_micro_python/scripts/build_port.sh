@@ -287,7 +287,7 @@ tr '\n' '\0' < "$SOURCES_FILE" \
         -DMICROPY_SSL_AXTLS=1 \
         -DMICROPY_PY_SSL=1 \
         -DLIBSSH2_AXTLS=1 \
-        -DHAVE_SELECT=1 -DHAVE_SYS_SELECT_H=1 \
+        -DHAVE_SELECT=1 -DHAVE_SYS_SELECT_H=1 -DHAVE_SYS_UIO_H=1 \
         -DPKTDRV_FORCE_CRYNWR=1 \
         -Dmp_stream_errno=errno \
         -o build/micropython.asm
