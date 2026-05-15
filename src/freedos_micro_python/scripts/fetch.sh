@@ -462,6 +462,23 @@ patch_axtls_x509_gettimeofday() {
 # Join those continuation lines so the macro name + arglist sit
 # together on one line; the preprocessor then expands normally.
 # Idempotent: skips when the marker is already present.
+patch_libssh2_crypto_engine_enum() {
+    # libssh2.h's libssh2_crypto_engine_t enum lists the supported
+    # backends. Our axtls backend defines LIBSSH2_CRYPTO_ENGINE as
+    # libssh2_axtls; version.c returns it, but the enum doesn't list
+    # libssh2_axtls so the identifier is undefined. Append it.
+    # Idempotent.
+    F="upstream/lib/libssh2/include/libssh2.h"
+    if [ ! -f "$F" ]; then return 0; fi
+    if grep -q "libssh2_axtls" "$F"; then
+        return 0
+    fi
+    echo "micropython: adding libssh2_axtls to libssh2.h crypto_engine_t enum …"
+    perl -0777 -i -pe '
+        s/(libssh2_os400qc3)(\s*\n\}\s+libssh2_crypto_engine_t)/$1,\n    libssh2_axtls$2/;
+    ' "$F"
+}
+
 patch_libssh2_sftp_handle_enum() {
     # sftp.h declares an anonymous enum INSIDE _LIBSSH2_SFTP_HANDLE
     # struct ({ LIBSSH2_SFTP_HANDLE_FILE, LIBSSH2_SFTP_HANDLE_DIR }).
@@ -662,6 +679,7 @@ if [ -d upstream ]; then
     patch_libssh2_callback_macros
     patch_libssh2_bsd_types
     patch_libssh2_sftp_handle_enum
+    patch_libssh2_crypto_engine_enum
     exit 0
 fi
 
@@ -699,3 +717,4 @@ patch_libssh2_crypto_dispatch
 patch_libssh2_callback_macros
 patch_libssh2_bsd_types
 patch_libssh2_sftp_handle_enum
+patch_libssh2_crypto_engine_enum
