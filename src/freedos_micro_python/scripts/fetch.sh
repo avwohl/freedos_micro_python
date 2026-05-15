@@ -403,6 +403,91 @@ patch_axtls_get_random_dos_int21() {
     ' "$F" > "$F.tmp" && mv "$F.tmp" "$F"
 }
 
+# axtls's TLS handshake path calls `time(NULL)` in two more spots beyond
+# get_random:
+#   - ssl/tls1_clnt.c send_client_hello   (ClientHello timestamp nonce)
+#   - ssl/tls1.c     ssl_session_update    (session LRU age)
+# Both go through our libc's `time()` → `dos_get_datetime` → INT 21h
+# AH=0x2A, which hits the same re-entrancy hang as the gettimeofday
+# path inside get_random (commit 9b0f9a4). Without this patch
+# ssl_client_new() hangs inside send_client_hello BEFORE writing
+# ClientHello to the wire — observable as a TLS handshake that
+# never starts (pcap shows TCP 3-way only, then silence).
+# Replace both with self-incrementing counters; the values are
+# non-security-critical (one is the nonce timestamp prefix, the
+# other is an LRU age tag). Idempotent.
+# axtls's cert verification path (`ssl/x509.c x509_verify`) calls
+# `gettimeofday(&tv, NULL)` to check the notBefore/notAfter window
+# during process_certificate. Same INT 21h AH=0x2A re-entrancy
+# hang as the time(NULL) patches above — observable as a TLS
+# handshake that gets past ClientHello + ServerHello + cert +
+# ServerHelloDone, then never sends ClientKeyExchange. Skip the
+# date-window check entirely; signature/chain verification still
+# runs above this point in the same function, which is the actual
+# meaningful security check. Idempotent.
+patch_axtls_x509_gettimeofday() {
+    F="upstream/lib/axtls/ssl/x509.c"
+    [ -f "$F" ] || return 0
+    if grep -q "uc386-dos: skip gettimeofday() — INT 21h AH=0x2A re-entrancy" "$F"; then
+        return 0
+    fi
+    if ! grep -q "    gettimeofday(&tv, NULL);" "$F"; then
+        echo "micropython: warn: x509.c shape changed — skipping x509 gettimeofday patch." >&2
+        return 0
+    fi
+    echo "micropython: patching axtls x509_verify to skip INT 21h gettimeofday …"
+    # Replace the one-line `gettimeofday(&tv, NULL);` call with a
+    # hardcoded 2026-mid timestamp so the notBefore/notAfter
+    # comparisons below still run against a sane "current time."
+    awk '
+        /^    gettimeofday\(&tv, NULL\);$/ {
+            print "    /* uc386-dos: skip gettimeofday() — INT 21h AH=0x2A re-entrancy"
+            print "       hangs PMODE/W mid-handshake. Use a hardcoded 2026-mid"
+            print "       timestamp so the notBefore/notAfter checks still run. */"
+            print "    tv.tv_sec = 1779000000L;   /* 2026-05-13 19:00 UTC */"
+            print "    tv.tv_usec = 0;"
+            next
+        }
+        { print }
+    ' "$F" > "$F.tmp" && mv "$F.tmp" "$F"
+}
+
+patch_axtls_time_dos_int21() {
+    F1="upstream/lib/axtls/ssl/tls1_clnt.c"
+    F2="upstream/lib/axtls/ssl/tls1.c"
+    [ -f "$F1" ] || return 0
+    [ -f "$F2" ] || return 0
+    if grep -q "uc386-dos: skip time(NULL)" "$F1"; then
+        return 0
+    fi
+    echo "micropython: patching axtls send_client_hello / ssl_session_update to skip INT 21h time() …"
+    awk '
+        /time_t tm = time\(NULL\);/ && !done {
+            print "    /* uc386-dos: skip time(NULL) — INT 21h AH=0x2A re-entrancy"
+            print "       hangs PMODE/W during the handshake. ClientHello timestamp"
+            print "       nonce is non-security-critical; use a counter. */"
+            print "    static unsigned long _hello_counter = 0;"
+            print "    _hello_counter += 0x9E3779B97F4A7C15UL;"
+            print "    time_t tm = (time_t)(_hello_counter & 0x7FFFFFFFUL);"
+            done = 1
+            next
+        }
+        { print }
+    ' "$F1" > "$F1.tmp" && mv "$F1.tmp" "$F1"
+    awk '
+        /time_t tm = time\(NULL\);/ && !done {
+            print "    /* uc386-dos: skip time(NULL) — same INT 21h re-entrancy as"
+            print "       tls1_clnt.c send_client_hello. LRU age tag only. */"
+            print "    static unsigned long _sess_counter = 0;"
+            print "    _sess_counter += 1;"
+            print "    time_t tm = (time_t)(_sess_counter & 0x7FFFFFFFUL);"
+            done = 1
+            next
+        }
+        { print }
+    ' "$F2" > "$F2.tmp" && mv "$F2.tmp" "$F2"
+}
+
 if [ -d upstream ]; then
     echo "micropython: upstream/ already present — skipping main fetch."
     fetch_b_con_crypto
@@ -415,6 +500,8 @@ if [ -d upstream ]; then
     patch_axtls_config_verify
     patch_axtls_endian_include
     patch_axtls_get_random_dos_int21
+    patch_axtls_time_dos_int21
+    patch_axtls_x509_gettimeofday
     exit 0
 fi
 
@@ -444,3 +531,5 @@ patch_main_disable_fs_stubs
 patch_axtls_config_verify
 patch_axtls_endian_include
 patch_axtls_get_random_dos_int21
+patch_axtls_time_dos_int21
+patch_axtls_x509_gettimeofday
