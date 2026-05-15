@@ -501,6 +501,13 @@ extern const struct _mp_obj_module_t mp_module_tls;
 #define UCDOS_MOD_ENTRY_SSL
 #endif
 
+// `_ssh` — port-supplied wrapper around libssh2 (uc386-dos/
+// modssh_uc386dos.c). The Python-facing API (Session, Channel,
+// SFTP) lives in examples/ssh.py + scp.py; this module exposes
+// the minimum surface the wrapper needs.
+extern const struct _mp_obj_module_t mp_module_ssh;
+#define UCDOS_MOD_ENTRY_SSH { MP_ROM_QSTR(MP_QSTR__ssh), MP_ROM_PTR(&mp_module_ssh) },
+
 #define MICROPY_REGISTERED_MODULES \
     { MP_ROM_QSTR(MP_QSTR_builtins), MP_ROM_PTR(&mp_module_builtins) }, \
     { MP_ROM_QSTR(MP_QSTR_sys), MP_ROM_PTR(&mp_module_sys) }, \
@@ -536,7 +543,8 @@ extern const struct _mp_obj_module_t mp_module_tls;
     UCDOS_MOD_ENTRY_SELECT \
     UCDOS_MOD_ENTRY_ASYNCIO \
     UCDOS_MOD_ENTRY_TLS \
-    UCDOS_MOD_ENTRY_SSL
+    UCDOS_MOD_ENTRY_SSL \
+    UCDOS_MOD_ENTRY_SSH
 
 // Module attribute-access delegation table — modules whose attr
 // loads/stores need to dispatch through a port-supplied function.

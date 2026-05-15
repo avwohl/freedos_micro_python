@@ -236,6 +236,7 @@ SOURCES_FILE="build/_port_sources.txt"
     # ChaCha20 / Blowfish / 3DES features are off in our flags.
     echo upstream/lib/tweetnacl/tweetnacl.c
     echo uc386-dos/libssh2_axtls.c
+    echo uc386-dos/modssh_uc386dos.c
     echo upstream/lib/libssh2/src/agent.c
     echo upstream/lib/libssh2/src/channel.c
     echo upstream/lib/libssh2/src/comp.c
