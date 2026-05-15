@@ -302,6 +302,14 @@ typedef struct {
 #define _libssh2_cipher_aes256ctr    6
 #define _libssh2_cipher_3des         7   /* declared but unsupported */
 #define _libssh2_cipher_blowfish     8   /* declared but unsupported */
+#define _libssh2_cipher_arcfour      9   /* unsupported */
+#define _libssh2_cipher_cast5        10  /* unsupported */
+#define _libssh2_cipher_aes128_gcm   11  /* unsupported */
+#define _libssh2_cipher_aes256_gcm   12  /* unsupported */
+#define _libssh2_cipher_chacha20     13  /* unsupported; referenced in crypt.c
+                                            method table but the method itself
+                                            won't be picked since LIBSSH2_AES_GCM
+                                            / chacha aren't enabled in our flags */
 
 int _libssh2_axtls_cipher_init(_libssh2_cipher_ctx *ctx, _libssh2_cipher_type(algo),
                                 unsigned char *iv, unsigned char *secret, int encrypt);
