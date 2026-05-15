@@ -79,16 +79,33 @@ echo "[rig] building FAT12 image ..."
 cp "$FREEDOS_IMG" "$TEST_IMG"
 mcopy -i "$TEST_IMG" -o "$MP_EXE"      ::MP.EXE
 mcopy -i "$TEST_IMG" -o "$NE2000_COM"  ::NE2000.COM
-mcopy -i "$TEST_IMG" -o ./WGETTEST.PY  ::WGETTEST.PY
-mcopy -i "$TEST_IMG" -o "$WGET_PY"     ::WGET.PY
+
+# Splice the CA PEM into WGETTEST.PY as a Python bytes literal —
+# DOS file IO (INT 21h AH=3D) hangs deterministically under PMODE/W
+# once the Crynwr NE2000 packet driver's IRQ 9 is unmasked (which
+# uc386_net.eth_init() does), regardless of socket state. The
+# template token `__CA_PEM_BYTES__` is replaced with a `b"..."`
+# literal of the CA root so MP never has to call open(TESTCA.PEM).
+WGETTEST_FINAL="$(pwd)/WGETTEST.PY.final"
+/Users/wohl/src/uc386/.venv/bin/python -c "
+import sys
+src = open('WGETTEST.PY', 'r').read()
+ca  = open('test-server-ca.pem', 'rb').read()
+# Build a Python-source bytes literal: b'\\xNN\\xNN...'
+lit = 'b\"' + ''.join('\\\\x%02x' % b for b in ca) + '\"'
+sys.stdout.write(src.replace('__CA_PEM_BYTES__', lit))
+" > "$WGETTEST_FINAL"
+mcopy -i "$TEST_IMG" -o "$WGETTEST_FINAL"  ::WGETTEST.PY
+mcopy -i "$TEST_IMG" -o "$WGET_PY"         ::WGET.PY
 mcopy -i "$TEST_IMG" -o ./test-server-ca.pem ::TESTCA.PEM
 
 # Same paste-mode wrapper as the TLS rig — Ctrl-E enters, Ctrl-D
-# fires execution, trailing Ctrl-D exits the REPL.
+# fires execution, trailing Ctrl-D exits the REPL. Use the .final
+# version with the CA literal already spliced in.
 WGETTEST_WRAPPED="$(pwd)/wgettest-wrapped.in"
 {
     printf '\x05'
-    cat ./WGETTEST.PY
+    cat "$WGETTEST_FINAL"
     printf '\x04'
     printf '\n\x04'
 } > "$WGETTEST_WRAPPED"
