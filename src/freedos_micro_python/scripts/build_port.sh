@@ -235,11 +235,11 @@ SOURCES_FILE="build/_port_sources.txt"
     echo upstream/lib/tweetnacl/tweetnacl.c
     echo uc386-dos/libssh2_axtls.c
     echo upstream/lib/libssh2/src/agent.c
-    echo upstream/lib/libssh2/src/bcrypt_pbkdf.c
-    echo upstream/lib/libssh2/src/blowfish.c
-    echo upstream/lib/libssh2/src/chacha.c
     echo upstream/lib/libssh2/src/channel.c
-    echo upstream/lib/libssh2/src/cipher-chachapoly.c
+    # cipher-chachapoly.c, chacha.c, poly1305.c, blowfish.c,
+    # bcrypt_pbkdf.c are all skipped — they use BSD types (u_int,
+    # u_char) that uc386's libc doesn't ship, and our feature
+    # flags disable ChaCha20 / Blowfish / 3DES anyway.
     echo upstream/lib/libssh2/src/comp.c
     echo upstream/lib/libssh2/src/crypt.c
     echo upstream/lib/libssh2/src/crypto.c
@@ -252,7 +252,6 @@ SOURCES_FILE="build/_port_sources.txt"
     echo upstream/lib/libssh2/src/misc.c
     echo upstream/lib/libssh2/src/packet.c
     echo upstream/lib/libssh2/src/pem.c
-    echo upstream/lib/libssh2/src/poly1305.c
     echo upstream/lib/libssh2/src/publickey.c
     echo upstream/lib/libssh2/src/scp.c
     echo upstream/lib/libssh2/src/session.c

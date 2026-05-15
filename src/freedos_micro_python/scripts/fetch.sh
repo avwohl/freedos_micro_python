@@ -462,6 +462,28 @@ patch_axtls_x509_gettimeofday() {
 # Join those continuation lines so the macro name + arglist sit
 # together on one line; the preprocessor then expands normally.
 # Idempotent: skips when the marker is already present.
+patch_libssh2_bsd_types() {
+    # libssh2's chacha.h / cipher-chachapoly.h use BSD typedefs
+    # `u_int` and `u_char` which uc386's libc doesn't ship. crypt.c
+    # transitively includes chacha.h even though we don't build
+    # the chacha source, so the typedef-missing error fires.
+    # Substitute the BSD names with their unsigned-int / unsigned-char
+    # equivalents in-place. Idempotent.
+    if grep -q "uc386-dos: BSD types replaced" upstream/lib/libssh2/src/chacha.h 2>/dev/null; then
+        return 0
+    fi
+    echo "micropython: patching libssh2 BSD-style u_int / u_char typedefs …"
+    for f in upstream/lib/libssh2/src/chacha.h \
+             upstream/lib/libssh2/src/cipher-chachapoly.h; do
+        [ -f "$f" ] || continue
+        perl -i -pe '
+            BEGIN { print "/* uc386-dos: BSD types replaced (u_int -> unsigned int) */\n"; }
+            s/\bu_int\b/unsigned int/g;
+            s/\bu_char\b/unsigned char/g;
+        ' "$f"
+    done
+}
+
 patch_libssh2_callback_macros() {
     DIRS="upstream/lib/libssh2/include upstream/lib/libssh2/src"
     # Idempotency check on the public header — if it's patched the
@@ -613,6 +635,7 @@ if [ -d upstream ]; then
     patch_axtls_x509_gettimeofday
     patch_libssh2_crypto_dispatch
     patch_libssh2_callback_macros
+    patch_libssh2_bsd_types
     exit 0
 fi
 
@@ -648,3 +671,4 @@ patch_axtls_time_dos_int21
 patch_axtls_x509_gettimeofday
 patch_libssh2_crypto_dispatch
 patch_libssh2_callback_macros
+patch_libssh2_bsd_types
