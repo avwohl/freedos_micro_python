@@ -27,9 +27,15 @@
 #include <string.h>
 #include <stdint.h>
 
-#include "crypto_misc.h"      /* axtls hashes + bigint (in axtls/ssl/) */
-#include "ssl.h"              /* axtls SSL_CTX, RSA_CTX (in axtls/ssl/) */
-#include "tweetnacl.h"        /* Curve25519 + Ed25519 */
+/* Deliberately do NOT include axtls's headers here — they define
+   a `comp` typedef (single-precision bigint component) that
+   collides with libssh2_priv.h's struct field `const
+   LIBSSH2_COMP_METHOD *comp`. Anything that needs axtls types
+   includes them only inside libssh2_axtls.c.
+
+   We use opaque-pointer ctxs so libssh2 sources only see void*
+   handles and never pull in the axtls type machinery. */
+#include "tweetnacl.h"        /* Curve25519 + Ed25519 (no comp collision) */
 
 /* ------------------------------------------------------------------
  * Feature flags — what this backend supports.
@@ -88,18 +94,14 @@ int _libssh2_axtls_random(unsigned char *buf, int len);
  * unified ctx (libssh2_axtls_hash_ctx) parameterized by algorithm.
  * ------------------------------------------------------------------ */
 
+/* Opaque ctx — backing store sized for the largest axtls hash ctx
+   (SHA512 is ~216 bytes). Don't pull axtls types into the public
+   header; cast to the real struct inside libssh2_axtls.c. */
+#define LIBSSH2_AXTLS_HASH_CTX_BYTES 256
+
 typedef struct libssh2_axtls_hash_ctx_struct {
-    int algo;          /* one of LIBSSH2_AXTLS_HASH_* below */
-    /* Pick the largest underlying ctx (SHA512) so the struct is
-       big enough regardless of algo. axtls's headers expose all of
-       them; we union over their storage. */
-    union {
-        SHA1_CTX     sha1;
-        SHA256_CTX   sha256;
-        SHA384_CTX   sha384;
-        SHA512_CTX   sha512;
-        MD5_CTX      md5;
-    } u;
+    int algo;
+    unsigned char storage[LIBSSH2_AXTLS_HASH_CTX_BYTES];
 } libssh2_axtls_hash_ctx;
 
 #define LIBSSH2_AXTLS_HASH_SHA1    1
@@ -191,8 +193,10 @@ typedef struct libssh2_axtls_hmac_ctx_struct {
  * _libssh2_axtls_rsa_new.
  * ------------------------------------------------------------------ */
 
+/* Opaque RSA ctx — points to an axtls RSA_CTX allocated on the
+   heap inside libssh2_axtls.c. */
 typedef struct {
-    RSA_CTX *ctx;
+    void *ctx;     /* really (RSA_CTX *) */
 } libssh2_axtls_rsa_ctx;
 
 #define libssh2_rsa_ctx libssh2_axtls_rsa_ctx
@@ -210,15 +214,13 @@ typedef struct {
     _libssh2_axtls_rsa_new_private_frommemory(rsactx, s, fd, fd_len, pw)
 
 #define _libssh2_rsa_sha1_sign(s, rsactx, hash, hash_len, sig, sig_len) \
-    _libssh2_axtls_rsa_sha_sign(s, rsactx, 1, hash, hash_len, sig, sig_len)
+    _libssh2_axtls_rsa_sha1_sign(s, rsactx, hash, hash_len, sig, sig_len)
 #define _libssh2_rsa_sha2_sign(s, rsactx, hash, hash_len, sig, sig_len) \
-    _libssh2_axtls_rsa_sha_sign(s, rsactx, (int)(hash_len), \
-                                  hash, hash_len, sig, sig_len)
+    _libssh2_axtls_rsa_sha2_sign(s, rsactx, hash, hash_len, sig, sig_len)
 #define _libssh2_rsa_sha1_verify(rsactx, sig, sig_len, m, m_len) \
-    _libssh2_axtls_rsa_sha_verify(rsactx, 1, sig, sig_len, m, m_len)
+    _libssh2_axtls_rsa_sha1_verify(rsactx, sig, sig_len, m, m_len)
 #define _libssh2_rsa_sha2_verify(rsactx, hash_len, sig, sig_len, m, m_len) \
-    _libssh2_axtls_rsa_sha_verify(rsactx, (int)(hash_len), \
-                                    sig, sig_len, m, m_len)
+    _libssh2_axtls_rsa_sha2_verify(rsactx, hash_len, sig, sig_len, m, m_len)
 
 #define _libssh2_rsa_free(rsactx) _libssh2_axtls_rsa_free(rsactx)
 
@@ -259,8 +261,8 @@ typedef struct {
 #define _libssh2_ed25519_verify(ctx, sig, sig_len, m, m_len) \
     _libssh2_axtls_ed25519_verify(ctx, sig, sig_len, m, m_len)
 
-#define _libssh2_curve25519_gen_k(k, p, srv_pub, srv_pub_len) \
-    _libssh2_axtls_curve25519_gen_k(k, p, srv_pub, srv_pub_len)
+#define _libssh2_curve25519_gen_k(k, p, srv_pub) \
+    _libssh2_axtls_curve25519_gen_k(k, p, srv_pub)
 
 #define _libssh2_curve25519_new(session, out_public, out_private) \
     _libssh2_axtls_curve25519_new(session, out_public, out_private)
@@ -271,11 +273,14 @@ typedef struct {
  * AES — CBC + CTR over axtls's AES core.
  * ------------------------------------------------------------------ */
 
+/* Opaque AES ctx. Backing store sized for axtls's AES_CTX
+   (~256 bytes). */
+#define LIBSSH2_AXTLS_AES_CTX_BYTES 320
 typedef struct {
-    AES_CTX ctx;
-    int    keylen_bits;
-    unsigned char ctr_iv[16];    /* for CTR mode */
-    int    is_ctr;
+    int keylen_bits;
+    unsigned char ctr_iv[16];
+    int is_ctr;
+    unsigned char storage[LIBSSH2_AXTLS_AES_CTX_BYTES];
 } libssh2_axtls_aes_ctx;
 
 #define _libssh2_cipher_type(name) int name
@@ -320,15 +325,13 @@ void _libssh2_axtls_cipher_dtor(_libssh2_cipher_ctx *ctx);
  * peers don't have Curve25519. axtls's bigint covers this.
  * ------------------------------------------------------------------ */
 
+/* Opaque DH/bigint ctx — backing store for axtls's BI_CTX + bigints. */
 typedef struct {
-    bigint *x;             /* private */
-    bigint *e;             /* public  */
-    bigint *p;
-    bigint *g;
-    BI_CTX *bi_ctx;
+    void *x; void *e; void *p; void *g;     /* axtls bigints */
+    void *bi_ctx;                            /* axtls BI_CTX */
 } _libssh2_bn_ctx;
 
-typedef bigint _libssh2_bn;
+typedef void _libssh2_bn;
 typedef _libssh2_bn_ctx _libssh2_dh_ctx;
 
 #define _libssh2_dh_init(dhctx)  _libssh2_axtls_dh_init(dhctx)

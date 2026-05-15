@@ -14,6 +14,20 @@
 #include "libssh2_axtls.h"
 #include "crypto.h"
 
+/* axtls headers — included only here so the `comp` typedef in
+   bigint_impl.h doesn't collide with libssh2_priv.h's struct
+   field of the same name. */
+#include "crypto_misc.h"      /* axtls hashes + bigint + RSA decls */
+#include "ssl.h"              /* axtls SSL_CTX, RSA_CTX */
+
+/* Helpers: re-interpret the opaque storage as the real axtls type. */
+#define _AS_SHA1(c)   ((SHA1_CTX *)((c)->storage))
+#define _AS_SHA256(c) ((SHA256_CTX *)((c)->storage))
+#define _AS_SHA384(c) ((SHA384_CTX *)((c)->storage))
+#define _AS_SHA512(c) ((SHA512_CTX *)((c)->storage))
+#define _AS_MD5(c)    ((MD5_CTX *)((c)->storage))
+#define _AS_AES(c)    ((AES_CTX *)((c)->storage))
+
 /* ------------------------------------------------------------------
  * Generic init / random.
  * ------------------------------------------------------------------ */
@@ -45,11 +59,11 @@ int _libssh2_axtls_random(unsigned char *buf, int len) {
 int _libssh2_axtls_hash_init(libssh2_axtls_hash_ctx *ctx, int algo) {
     ctx->algo = algo;
     switch (algo) {
-        case LIBSSH2_AXTLS_HASH_SHA1:   SHA1_Init(&ctx->u.sha1);     return 1;
-        case LIBSSH2_AXTLS_HASH_SHA256: SHA256_Init(&ctx->u.sha256); return 1;
-        case LIBSSH2_AXTLS_HASH_SHA384: SHA384_Init(&ctx->u.sha384); return 1;
-        case LIBSSH2_AXTLS_HASH_SHA512: SHA512_Init(&ctx->u.sha512); return 1;
-        case LIBSSH2_AXTLS_HASH_MD5:    MD5_Init(&ctx->u.md5);       return 1;
+        case LIBSSH2_AXTLS_HASH_SHA1:   SHA1_Init(_AS_SHA1(ctx));     return 1;
+        case LIBSSH2_AXTLS_HASH_SHA256: SHA256_Init(_AS_SHA256(ctx)); return 1;
+        case LIBSSH2_AXTLS_HASH_SHA384: SHA384_Init(_AS_SHA384(ctx)); return 1;
+        case LIBSSH2_AXTLS_HASH_SHA512: SHA512_Init(_AS_SHA512(ctx)); return 1;
+        case LIBSSH2_AXTLS_HASH_MD5:    MD5_Init(_AS_MD5(ctx));       return 1;
     }
     return 0;
 }
@@ -59,26 +73,26 @@ int _libssh2_axtls_hash_update(libssh2_axtls_hash_ctx *ctx,
     const uint8_t *d = (const uint8_t *)data;
     switch (ctx->algo) {
         case LIBSSH2_AXTLS_HASH_SHA1:
-            SHA1_Update(&ctx->u.sha1, d, (int)len); return 1;
+            SHA1_Update(_AS_SHA1(ctx), d, (int)len); return 1;
         case LIBSSH2_AXTLS_HASH_SHA256:
-            SHA256_Update(&ctx->u.sha256, d, (int)len); return 1;
+            SHA256_Update(_AS_SHA256(ctx), d, (int)len); return 1;
         case LIBSSH2_AXTLS_HASH_SHA384:
-            SHA384_Update(&ctx->u.sha384, d, (int)len); return 1;
+            SHA384_Update(_AS_SHA384(ctx), d, (int)len); return 1;
         case LIBSSH2_AXTLS_HASH_SHA512:
-            SHA512_Update(&ctx->u.sha512, d, (int)len); return 1;
+            SHA512_Update(_AS_SHA512(ctx), d, (int)len); return 1;
         case LIBSSH2_AXTLS_HASH_MD5:
-            MD5_Update(&ctx->u.md5, d, (int)len); return 1;
+            MD5_Update(_AS_MD5(ctx), d, (int)len); return 1;
     }
     return 0;
 }
 
 int _libssh2_axtls_hash_final(libssh2_axtls_hash_ctx *ctx, unsigned char *out) {
     switch (ctx->algo) {
-        case LIBSSH2_AXTLS_HASH_SHA1:   SHA1_Final(out, &ctx->u.sha1);     return 1;
-        case LIBSSH2_AXTLS_HASH_SHA256: SHA256_Final(out, &ctx->u.sha256); return 1;
-        case LIBSSH2_AXTLS_HASH_SHA384: SHA384_Final(out, &ctx->u.sha384); return 1;
-        case LIBSSH2_AXTLS_HASH_SHA512: SHA512_Final(out, &ctx->u.sha512); return 1;
-        case LIBSSH2_AXTLS_HASH_MD5:    MD5_Final(out, &ctx->u.md5);       return 1;
+        case LIBSSH2_AXTLS_HASH_SHA1:   SHA1_Final(out, _AS_SHA1(ctx));     return 1;
+        case LIBSSH2_AXTLS_HASH_SHA256: SHA256_Final(out, _AS_SHA256(ctx)); return 1;
+        case LIBSSH2_AXTLS_HASH_SHA384: SHA384_Final(out, _AS_SHA384(ctx)); return 1;
+        case LIBSSH2_AXTLS_HASH_SHA512: SHA512_Final(out, _AS_SHA512(ctx)); return 1;
+        case LIBSSH2_AXTLS_HASH_MD5:    MD5_Final(out, _AS_MD5(ctx));       return 1;
     }
     return 0;
 }
@@ -199,9 +213,9 @@ int _libssh2_axtls_cipher_init(_libssh2_cipher_ctx *ctx, int algo,
         case _libssh2_cipher_aes256ctr: mode = AES_MODE_256; break;
         default: return -1;
     }
-    AES_set_key(&ctx->ctx, secret, iv, mode);
+    AES_set_key(_AS_AES(ctx), secret, iv, mode);
     if (!encrypt) {
-        AES_convert_key(&ctx->ctx);
+        AES_convert_key(_AS_AES(ctx));
     }
     ctx->keylen_bits = (mode == AES_MODE_128) ? 128 : 256;
     ctx->is_ctr = (algo >= _libssh2_cipher_aes128ctr && algo <= _libssh2_cipher_aes256ctr);
@@ -222,7 +236,7 @@ int _libssh2_axtls_cipher_crypt(_libssh2_cipher_ctx *ctx, int algo,
             unsigned char keystream[16];
             memcpy(keystream, ctx->ctr_iv, 16);
             /* In-place encrypt the counter into keystream. */
-            AES_encrypt(&ctx->ctx, (uint32_t *)keystream);
+            AES_encrypt(_AS_AES(ctx), (uint32_t *)keystream);
             size_t j;
             size_t take = (blocklen - i < 16) ? (blocklen - i) : 16;
             for (j = 0; j < take; j++) {
@@ -238,9 +252,9 @@ int _libssh2_axtls_cipher_crypt(_libssh2_cipher_ctx *ctx, int algo,
         /* CBC. axtls's AES_cbc_encrypt/decrypt updates the IV
            inside the ctx automatically. */
         if (encrypt) {
-            AES_cbc_encrypt(&ctx->ctx, block, block, (int)blocklen);
+            AES_cbc_encrypt(_AS_AES(ctx), block, block, (int)blocklen);
         } else {
-            AES_cbc_decrypt(&ctx->ctx, block, block, (int)blocklen);
+            AES_cbc_decrypt(_AS_AES(ctx), block, block, (int)blocklen);
         }
     }
     return 0;
@@ -255,8 +269,8 @@ void _libssh2_axtls_cipher_dtor(_libssh2_cipher_ctx *ctx) {
  * ------------------------------------------------------------------ */
 
 int _libssh2_axtls_curve25519_new(LIBSSH2_SESSION *session,
-                                    unsigned char public_key[32],
-                                    unsigned char private_key[32]) {
+                                    uint8_t public_key[32],
+                                    uint8_t private_key[32]) {
     /* Generate a random scalar; clamp per RFC 7748. */
     _libssh2_axtls_random(private_key, 32);
     private_key[0]  &= 248;
@@ -269,16 +283,14 @@ int _libssh2_axtls_curve25519_new(LIBSSH2_SESSION *session,
 }
 
 int _libssh2_axtls_curve25519_gen_k(_libssh2_bn **k,
-                                      unsigned char private_key[32],
-                                      const unsigned char *server_public_key,
-                                      size_t server_public_key_len) {
+                                      uint8_t private_key[32],
+                                      uint8_t server_public_key[32]) {
     /* k = X25519(private, server_public). Output is a 32-byte
        shared secret. libssh2 wraps it as a bigint for the
        transport-layer mix. */
     (void)k;
     (void)private_key;
     (void)server_public_key;
-    (void)server_public_key_len;
     return -1;  /* TODO: wire to _libssh2_axtls_bn_from_bin */
 }
 
@@ -367,27 +379,42 @@ int _libssh2_axtls_rsa_new_private_frommemory(libssh2_axtls_rsa_ctx **rsa,
     return -1;  /* TODO: parse PEM in memory */
 }
 
-int _libssh2_axtls_rsa_sha_sign(LIBSSH2_SESSION *session,
-                                  libssh2_axtls_rsa_ctx *rsactx,
-                                  int hash_algo,
-                                  const unsigned char *hash, size_t hash_len,
-                                  unsigned char **signature, size_t *signature_len) {
-    (void)session; (void)rsactx; (void)hash_algo;
+int _libssh2_axtls_rsa_sha1_sign(LIBSSH2_SESSION *session,
+                                   libssh2_axtls_rsa_ctx *rsactx,
+                                   const unsigned char *hash, size_t hash_len,
+                                   unsigned char **signature, size_t *signature_len) {
+    (void)session; (void)rsactx;
     (void)hash; (void)hash_len; (void)signature; (void)signature_len;
-    return -1;  /* TODO: RSA_encrypt with priv key */
+    return -1;  /* TODO: RSA_encrypt with priv key + SHA1 prefix */
 }
 
-int _libssh2_axtls_rsa_sha_verify(libssh2_axtls_rsa_ctx *rsactx,
-                                    int hash_algo,
-                                    const unsigned char *sig, size_t sig_len,
-                                    const unsigned char *m, size_t m_len) {
-    (void)rsactx; (void)hash_algo; (void)sig; (void)sig_len; (void)m; (void)m_len;
-    return -1;  /* TODO: RSA_verify (axtls native) */
+int _libssh2_axtls_rsa_sha2_sign(LIBSSH2_SESSION *session,
+                                   libssh2_axtls_rsa_ctx *rsactx,
+                                   const unsigned char *hash, size_t hash_len,
+                                   unsigned char **signature, size_t *signature_len) {
+    (void)session; (void)rsactx;
+    (void)hash; (void)hash_len; (void)signature; (void)signature_len;
+    return -1;  /* TODO: RSA_encrypt with priv key + SHA256/512 prefix */
+}
+
+int _libssh2_axtls_rsa_sha1_verify(libssh2_axtls_rsa_ctx *rsactx,
+                                     const unsigned char *sig, size_t sig_len,
+                                     const unsigned char *m, size_t m_len) {
+    (void)rsactx; (void)sig; (void)sig_len; (void)m; (void)m_len;
+    return -1;  /* TODO: RSA_verify SHA1 */
+}
+
+int _libssh2_axtls_rsa_sha2_verify(libssh2_axtls_rsa_ctx *rsactx,
+                                     size_t hash_len,
+                                     const unsigned char *sig, size_t sig_len,
+                                     const unsigned char *m, size_t m_len) {
+    (void)rsactx; (void)hash_len; (void)sig; (void)sig_len; (void)m; (void)m_len;
+    return -1;  /* TODO: RSA_verify SHA2 */
 }
 
 void _libssh2_axtls_rsa_free(libssh2_axtls_rsa_ctx *rsactx) {
     if (rsactx && rsactx->ctx) {
-        RSA_free(rsactx->ctx);
+        RSA_free((RSA_CTX *)rsactx->ctx);
         rsactx->ctx = NULL;
     }
 }
