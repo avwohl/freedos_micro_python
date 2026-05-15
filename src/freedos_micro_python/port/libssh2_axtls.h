@@ -73,10 +73,13 @@
  * which we don't expose). */
 #define EC_MAX_POINT_LEN ((528 * 2 / 8) + 1)
 
-/* Max RSA / DH bigint modulus libssh2 will accept. 2048 bits is
-   enough for axtls's RSA (which our backend uses); larger DH
-   groups (group14: 2048, group16: 4096) are outside our scope. */
-#define LIBSSH2_DH_MAX_MODULUS_BITS 2048
+/* DH-GEX bounds + max modulus bits. Mirror openssl backend's
+   values; KEX is Curve25519-first anyway so the DH-GEX path is
+   only a fallback. */
+#define LIBSSH2_DH_GEX_MINGROUP     2048
+#define LIBSSH2_DH_GEX_OPTGROUP     4096
+#define LIBSSH2_DH_GEX_MAXGROUP     8192
+#define LIBSSH2_DH_MAX_MODULUS_BITS 16384
 
 /* ------------------------------------------------------------------
  * Generic init / random.
