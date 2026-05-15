@@ -488,11 +488,62 @@ patch_axtls_time_dos_int21() {
     ' "$F2" > "$F2.tmp" && mv "$F2.tmp" "$F2"
 }
 
+# libssh2 — SSH client library, used by the port's `_ssh` MP module
+# and the Python-level `sftp` / `scp` wrappers. Pinned to the latest
+# stable release tarball; we ship a custom crypto backend
+# (`uc386-dos/libssh2_crypto_axtls.c`) that adapts libssh2's
+# `crypto.h` API surface to axtls's primitives + a TweetNaCl-derived
+# Ed25519/X25519 impl. Linked into MP.EXE as part of build_port.sh.
+fetch_libssh2() {
+    LIBSSH2_VER="1.11.1"
+    LIBSSH2_DIR="upstream/lib/libssh2"
+    if [ -d "$LIBSSH2_DIR/src" ]; then
+        return 0
+    fi
+    echo "micropython: fetching libssh2 $LIBSSH2_VER …"
+    LSH_TMP="$(mktemp -d)"
+    trap 'rm -rf "$LSH_TMP"' RETURN 2>/dev/null || true
+    curl -fsSL \
+        "https://www.libssh2.org/download/libssh2-${LIBSSH2_VER}.tar.gz" \
+        -o "$LSH_TMP/libssh2.tgz"
+    tar -xzf "$LSH_TMP/libssh2.tgz" -C "$LSH_TMP"
+    mkdir -p "$LIBSSH2_DIR"
+    cp -r "$LSH_TMP"/libssh2-*/src     "$LIBSSH2_DIR/"
+    cp -r "$LSH_TMP"/libssh2-*/include "$LIBSSH2_DIR/"
+    rm -rf "$LSH_TMP"
+}
+
+# TweetNaCl — public-domain Curve25519/Ed25519/Poly1305/ChaCha20
+# reference impl in a single ~800-line .c file. Provides the
+# primitives libssh2 needs that axtls doesn't ship: Curve25519
+# scalarmult (X25519 KEX) and Ed25519 sign/verify (pubkey auth /
+# host-key verification). Two files: tweetnacl.c + tweetnacl.h.
+fetch_tweetnacl() {
+    TNAC_DIR="upstream/lib/tweetnacl"
+    if [ -f "$TNAC_DIR/tweetnacl.c" ]; then
+        return 0
+    fi
+    echo "micropython: fetching TweetNaCl …"
+    mkdir -p "$TNAC_DIR"
+    # The canonical hosting is tweetnacl.cr.yp.to but it doesn't
+    # version. The dchest/tweetnacl-js mirror keeps the C source
+    # alongside the JS port and pins a commit, which is what we
+    # want for reproducible builds.
+    TNAC_BASE="https://raw.githubusercontent.com/ultramancool/tweetnacl-usable/master"
+    for f in tweetnacl.c tweetnacl.h; do
+        if [ ! -f "$TNAC_DIR/$f" ]; then
+            curl -fsSL "$TNAC_BASE/$f" -o "$TNAC_DIR/$f"
+        fi
+    done
+}
+
 if [ -d upstream ]; then
     echo "micropython: upstream/ already present — skipping main fetch."
     fetch_b_con_crypto
     fetch_lwip
     fetch_axtls
+    fetch_libssh2
+    fetch_tweetnacl
     patch_modlwip_loopback_poll
     patch_main_startup_markers
     patch_main_pktdrv_prealloc
@@ -524,6 +575,8 @@ echo "micropython: upstream tree at $(pwd)/upstream/"
 fetch_b_con_crypto
 fetch_lwip
 fetch_axtls
+fetch_libssh2
+fetch_tweetnacl
 patch_modlwip_loopback_poll
 patch_main_startup_markers
 patch_main_pktdrv_prealloc
