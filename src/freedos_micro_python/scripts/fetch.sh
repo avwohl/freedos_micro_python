@@ -478,7 +478,8 @@ patch_libssh2_bsd_types() {
     # (chacha.h / poly1305.h / cipher-chachapoly.h).
     for f in upstream/lib/libssh2/src/chacha.h \
              upstream/lib/libssh2/src/cipher-chachapoly.h \
-             upstream/lib/libssh2/src/poly1305.h; do
+             upstream/lib/libssh2/src/poly1305.h \
+             upstream/lib/libssh2/src/crypt.c; do
         [ -f "$f" ] || continue
         perl -i -pe '
             BEGIN { print "/* uc386-dos: BSD types replaced (u_int -> unsigned int) */\n"; }
