@@ -462,6 +462,26 @@ patch_axtls_x509_gettimeofday() {
 # Join those continuation lines so the macro name + arglist sit
 # together on one line; the preprocessor then expands normally.
 # Idempotent: skips when the marker is already present.
+patch_libssh2_sftp_handle_enum() {
+    # sftp.h declares an anonymous enum INSIDE _LIBSSH2_SFTP_HANDLE
+    # struct ({ LIBSSH2_SFTP_HANDLE_FILE, LIBSSH2_SFTP_HANDLE_DIR }).
+    # uc386 doesn't hoist anonymous-enum members from struct scope
+    # to file scope, so references from sftp.c fail. Promote the
+    # enum to a top-level definition before the struct. Idempotent.
+    F="upstream/lib/libssh2/src/sftp.h"
+    if [ ! -f "$F" ]; then return 0; fi
+    if grep -q "uc386-dos: hoisted handle_type enum" "$F"; then
+        return 0
+    fi
+    echo "micropython: hoisting libssh2 sftp.h handle_type anonymous enum …"
+    # Insert top-level enum just before `struct _LIBSSH2_SFTP_HANDLE`;
+    # rewrite the in-struct anonymous enum to use the typedef'd name.
+    perl -0777 -i -pe '
+        s/(struct _LIBSSH2_SFTP_HANDLE\s*\n\{)/\/* uc386-dos: hoisted handle_type enum (anonymous-in-struct unsupported) *\/\nenum libssh2_sftp_handle_type {\n    LIBSSH2_SFTP_HANDLE_FILE,\n    LIBSSH2_SFTP_HANDLE_DIR\n};\n$1/;
+        s/enum\s*\{\s*\n\s*LIBSSH2_SFTP_HANDLE_FILE,\s*\n\s*LIBSSH2_SFTP_HANDLE_DIR\s*\n\s*\}\s+handle_type;/enum libssh2_sftp_handle_type handle_type;/s;
+    ' "$F"
+}
+
 patch_libssh2_bsd_types() {
     # libssh2's chacha.h / cipher-chachapoly.h use BSD typedefs
     # `u_int` and `u_char` which uc386's libc doesn't ship. crypt.c
@@ -641,6 +661,7 @@ if [ -d upstream ]; then
     patch_libssh2_crypto_dispatch
     patch_libssh2_callback_macros
     patch_libssh2_bsd_types
+    patch_libssh2_sftp_handle_enum
     exit 0
 fi
 
@@ -677,3 +698,4 @@ patch_axtls_x509_gettimeofday
 patch_libssh2_crypto_dispatch
 patch_libssh2_callback_macros
 patch_libssh2_bsd_types
+patch_libssh2_sftp_handle_enum
