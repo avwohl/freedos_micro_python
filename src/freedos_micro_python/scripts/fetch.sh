@@ -587,9 +587,14 @@ patch_axtls_time_dos_int21() {
         /time_t tm = time\(NULL\);/ && !done {
             print "    /* uc386-dos: skip time(NULL) — INT 21h AH=0x2A re-entrancy"
             print "       hangs PMODE/W during the handshake. ClientHello timestamp"
-            print "       nonce is non-security-critical; use a counter. */"
+            print "       nonce is non-security-critical; use a counter. 32-bit"
+            print "       golden-ratio constant — using the ULL form (..7F4A7C15)"
+            print "       trips uc386 into 64-bit arithmetic for what is a 32-bit"
+            print "       variable, which leaves edx live across statement"
+            print "       boundaries. Stick with the 32-bit literal to keep the"
+            print "       codegen path identical to the rest of the function. */"
             print "    static unsigned long _hello_counter = 0;"
-            print "    _hello_counter += 0x9E3779B97F4A7C15UL;"
+            print "    _hello_counter += 0x9E3779B9UL;"
             print "    time_t tm = (time_t)(_hello_counter & 0x7FFFFFFFUL);"
             done = 1
             next
