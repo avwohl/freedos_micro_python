@@ -3240,3 +3240,40 @@ def test_micropython_ssl_load_verify_locations_requires_cadata(micropython_bin: 
     assert "RAISED_OK" in res.stdout, (
         f"missing-cadata didn't raise: {res.stdout!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# `_ssh` module — thin MP wrapper around libssh2. The full SSH/SCP path
+# (Session, Channel, SFTP) lives in examples/ssh.py + scp.py; these
+# probes just verify libssh2 is linked into the binary and our axtls
+# crypto adapter is the active backend.
+# ---------------------------------------------------------------------------
+
+
+def test_micropython_import_ssh(micropython_bin: Path) -> None:
+    """`import _ssh` should resolve. `_ssh.version()` returns the
+    libssh2 version string; `_ssh.crypto_engine_name()` returns the
+    name of the linked-in crypto backend (must be 'axtls' for this
+    port — the openssl/mbedtls/wincng backends aren't available)."""
+    from uc386.harness import run
+
+    program = (
+        b"import _ssh\n"
+        b"print('SSH_VER:', _ssh.version())\n"
+        b"print('SSH_ENG:', _ssh.crypto_engine_name())\n"
+        b"\x04"
+    )
+    res = run(micropython_bin,
+              stdin_bytes=program,
+              timeout_seconds=20.0,
+              instruction_limit=8_000_000_000)
+    assert not res.timed_out, "REPL didn't exit"
+    assert res.error is None, f"dos_emu reported error: {res.error}"
+    # libssh2 1.11.x is what fetch.sh pins; bump together with the
+    # tarball SHA when promoting to a newer libssh2 release.
+    assert "SSH_VER: 1.11" in res.stdout, (
+        f"_ssh.version() not 1.11.x: {res.stdout!r}"
+    )
+    assert "SSH_ENG: axtls" in res.stdout, (
+        f"_ssh.crypto_engine_name() != axtls: {res.stdout!r}"
+    )
