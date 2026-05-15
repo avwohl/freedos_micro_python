@@ -228,6 +228,39 @@ SOURCES_FILE="build/_port_sources.txt"
     # replaces the libc.asm stubs (now removed). Required by axtls
     # cert verification (notBefore/notAfter window check).
     echo uc386-dos/time_real_uc386dos.c
+    # libssh2 + TweetNaCl (Curve25519/Ed25519/SHA-512 ref impl) +
+    # our axtls crypto adapter. Subset of libssh2/src/ — skip the
+    # crypto backend files (openssl.c/mbedtls.c/etc.) since we
+    # replace them with libssh2_axtls.c.
+    echo upstream/lib/tweetnacl/tweetnacl.c
+    echo uc386-dos/libssh2_axtls.c
+    echo upstream/lib/libssh2/src/agent.c
+    echo upstream/lib/libssh2/src/bcrypt_pbkdf.c
+    echo upstream/lib/libssh2/src/blowfish.c
+    echo upstream/lib/libssh2/src/chacha.c
+    echo upstream/lib/libssh2/src/channel.c
+    echo upstream/lib/libssh2/src/cipher-chachapoly.c
+    echo upstream/lib/libssh2/src/comp.c
+    echo upstream/lib/libssh2/src/crypt.c
+    echo upstream/lib/libssh2/src/crypto.c
+    echo upstream/lib/libssh2/src/global.c
+    echo upstream/lib/libssh2/src/hostkey.c
+    echo upstream/lib/libssh2/src/keepalive.c
+    echo upstream/lib/libssh2/src/kex.c
+    echo upstream/lib/libssh2/src/knownhost.c
+    echo upstream/lib/libssh2/src/mac.c
+    echo upstream/lib/libssh2/src/misc.c
+    echo upstream/lib/libssh2/src/packet.c
+    echo upstream/lib/libssh2/src/pem.c
+    echo upstream/lib/libssh2/src/poly1305.c
+    echo upstream/lib/libssh2/src/publickey.c
+    echo upstream/lib/libssh2/src/scp.c
+    echo upstream/lib/libssh2/src/session.c
+    echo upstream/lib/libssh2/src/sftp.c
+    echo upstream/lib/libssh2/src/transport.c
+    echo upstream/lib/libssh2/src/userauth.c
+    echo upstream/lib/libssh2/src/userauth_kbd_packet.c
+    echo upstream/lib/libssh2/src/version.c
 } > "$SOURCES_FILE"
 
 n_sources="$(wc -l < "$SOURCES_FILE")"
@@ -245,12 +278,16 @@ tr '\n' '\0' < "$SOURCES_FILE" \
         -I upstream/lib/axtls/ssl \
         -I upstream/lib/axtls/crypto \
         -I upstream/extmod/axtls-include \
+        -I upstream/lib/libssh2/include \
+        -I upstream/lib/libssh2/src \
+        -I upstream/lib/tweetnacl \
         -I uc386-dos \
         -I build \
         -D__linux__=1 \
         -DNDEBUG=1 \
         -DMICROPY_SSL_AXTLS=1 \
         -DMICROPY_PY_SSL=1 \
+        -DLIBSSH2_AXTLS=1 \
         -DPKTDRV_FORCE_CRYNWR=1 \
         -Dmp_stream_errno=errno \
         -o build/micropython.asm

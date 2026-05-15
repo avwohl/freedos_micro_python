@@ -452,6 +452,28 @@ patch_axtls_x509_gettimeofday() {
     ' "$F" > "$F.tmp" && mv "$F.tmp" "$F"
 }
 
+# libssh2's crypto.h dispatches to a backend header by checking the
+# LIBSSH2_<BACKEND> define. We add an LIBSSH2_AXTLS branch that
+# pulls in our port-side adapter header (port/libssh2_axtls.h is
+# wired into the -I include path by build_port.sh). Idempotent:
+# skips if the branch already exists.
+patch_libssh2_crypto_dispatch() {
+    F="upstream/lib/libssh2/src/crypto.h"
+    if [ ! -f "$F" ]; then return 0; fi
+    if grep -q "LIBSSH2_AXTLS" "$F"; then
+        return 0
+    fi
+    echo "micropython: patching libssh2 crypto.h dispatch for LIBSSH2_AXTLS …"
+    awk '
+        /^#elif defined\(LIBSSH2_WINCNG\)/ && !inserted {
+            print "#elif defined(LIBSSH2_AXTLS)"
+            print "#include \"libssh2_axtls.h\""
+            inserted = 1
+        }
+        { print }
+    ' "$F" > "$F.tmp" && mv "$F.tmp" "$F"
+}
+
 patch_axtls_time_dos_int21() {
     F1="upstream/lib/axtls/ssl/tls1_clnt.c"
     F2="upstream/lib/axtls/ssl/tls1.c"
@@ -553,6 +575,7 @@ if [ -d upstream ]; then
     patch_axtls_get_random_dos_int21
     patch_axtls_time_dos_int21
     patch_axtls_x509_gettimeofday
+    patch_libssh2_crypto_dispatch
     exit 0
 fi
 
@@ -586,3 +609,4 @@ patch_axtls_endian_include
 patch_axtls_get_random_dos_int21
 patch_axtls_time_dos_int21
 patch_axtls_x509_gettimeofday
+patch_libssh2_crypto_dispatch
