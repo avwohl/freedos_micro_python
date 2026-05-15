@@ -463,16 +463,29 @@ patch_axtls_x509_gettimeofday() {
 # together on one line; the preprocessor then expands normally.
 # Idempotent: skips when the marker is already present.
 patch_libssh2_callback_macros() {
+    DIRS="upstream/lib/libssh2/include upstream/lib/libssh2/src"
+    # Idempotency check on the public header — if it's patched the
+    # rest were too in the same run.
     F="upstream/lib/libssh2/include/libssh2.h"
-    if [ ! -f "$F" ]; then return 0; fi
-    if grep -q "uc386-dos: joined LIBSSH2 callback-macro" "$F"; then
+    if [ -f "$F" ] && grep -q "uc386-dos: joined LIBSSH2 callback-macro" "$F"; then
         return 0
     fi
-    echo "micropython: joining libssh2.h callback-macro continuation lines …"
-    # Wrap a marker comment + join the lines.
-    perl -0777 -i -pe '
-        s/(LIBSSH2_[A-Z_]+_FUNC)\n(\s*)(\(\(\*[a-zA-Z_][a-zA-Z0-9_]*\)\))/\/\* uc386-dos: joined LIBSSH2 callback-macro \*\/ $1$3/gs;
-    ' "$F"
+    echo "micropython: joining libssh2 callback-macro continuation lines …"
+    # Walk every .h and .c. The pattern is:
+    #   <macro name>\n<whitespace>((*name))
+    # → <macro>((*name))
+    # so the preprocessor's function-like-macro expansion can run
+    # (uc386's preprocessor doesn't recognise the call when the
+    # arglist is on the next source line).
+    for d in $DIRS; do
+        [ -d "$d" ] || continue
+        for f in "$d"/*.h "$d"/*.c; do
+            [ -f "$f" ] || continue
+            perl -0777 -i -pe '
+                s/(LIBSSH2_[A-Z_]+_FUNC)\n(\s*)(\(\(\*[a-zA-Z_][a-zA-Z0-9_]*\)\))/\/\* uc386-dos: joined LIBSSH2 callback-macro \*\/ $1$3/gs;
+            ' "$f"
+        done
+    done
 }
 
 # libssh2's crypto.h dispatches to a backend header by checking the
