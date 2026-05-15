@@ -473,8 +473,12 @@ patch_libssh2_bsd_types() {
         return 0
     fi
     echo "micropython: patching libssh2 BSD-style u_int / u_char typedefs …"
+    # All libssh2 headers that name BSD types — even the ones we
+    # don't build .c for are still transitively included by crypt.c
+    # (chacha.h / poly1305.h / cipher-chachapoly.h).
     for f in upstream/lib/libssh2/src/chacha.h \
-             upstream/lib/libssh2/src/cipher-chachapoly.h; do
+             upstream/lib/libssh2/src/cipher-chachapoly.h \
+             upstream/lib/libssh2/src/poly1305.h; do
         [ -f "$f" ] || continue
         perl -i -pe '
             BEGIN { print "/* uc386-dos: BSD types replaced (u_int -> unsigned int) */\n"; }
