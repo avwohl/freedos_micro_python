@@ -452,6 +452,29 @@ patch_axtls_x509_gettimeofday() {
     ' "$F" > "$F.tmp" && mv "$F.tmp" "$F"
 }
 
+# uc386's preprocessor doesn't expand a macro identifier when its
+# argument list is on the NEXT source line. libssh2.h relies on
+# that pattern for callback function-pointer params:
+#
+#   LIBSSH2_PASSWD_CHANGEREQ_FUNC          ← line N
+#       ((*passwd_change_cb))              ← line N+1
+#
+# Join those continuation lines so the macro name + arglist sit
+# together on one line; the preprocessor then expands normally.
+# Idempotent: skips when the marker is already present.
+patch_libssh2_callback_macros() {
+    F="upstream/lib/libssh2/include/libssh2.h"
+    if [ ! -f "$F" ]; then return 0; fi
+    if grep -q "uc386-dos: joined LIBSSH2 callback-macro" "$F"; then
+        return 0
+    fi
+    echo "micropython: joining libssh2.h callback-macro continuation lines …"
+    # Wrap a marker comment + join the lines.
+    perl -0777 -i -pe '
+        s/(LIBSSH2_[A-Z_]+_FUNC)\n(\s*)(\(\(\*[a-zA-Z_][a-zA-Z0-9_]*\)\))/\/\* uc386-dos: joined LIBSSH2 callback-macro \*\/ $1$3/gs;
+    ' "$F"
+}
+
 # libssh2's crypto.h dispatches to a backend header by checking the
 # LIBSSH2_<BACKEND> define. We add an LIBSSH2_AXTLS branch that
 # pulls in our port-side adapter header (port/libssh2_axtls.h is
@@ -576,6 +599,7 @@ if [ -d upstream ]; then
     patch_axtls_time_dos_int21
     patch_axtls_x509_gettimeofday
     patch_libssh2_crypto_dispatch
+    patch_libssh2_callback_macros
     exit 0
 fi
 
@@ -610,3 +634,4 @@ patch_axtls_get_random_dos_int21
 patch_axtls_time_dos_int21
 patch_axtls_x509_gettimeofday
 patch_libssh2_crypto_dispatch
+patch_libssh2_callback_macros
