@@ -228,18 +228,16 @@ SOURCES_FILE="build/_port_sources.txt"
     # replaces the libc.asm stubs (now removed). Required by axtls
     # cert verification (notBefore/notAfter window check).
     echo uc386-dos/time_real_uc386dos.c
-    # libssh2 + TweetNaCl (Curve25519/Ed25519/SHA-512 ref impl) +
-    # our axtls crypto adapter. Subset of libssh2/src/ — skip the
-    # crypto backend files (openssl.c/mbedtls.c/etc.) since we
-    # replace them with libssh2_axtls.c.
+    # libssh2 + TweetNaCl + axtls adapter. Pruned by DCE until MP
+    # _ssh module is wired up (so build is identical to a build
+    # without these — adding them gates the future MP _ssh module
+    # work). cipher-chachapoly.c, chacha.c, poly1305.c, blowfish.c,
+    # bcrypt_pbkdf.c are skipped: BSD typedef collisions and the
+    # ChaCha20 / Blowfish / 3DES features are off in our flags.
     echo upstream/lib/tweetnacl/tweetnacl.c
     echo uc386-dos/libssh2_axtls.c
     echo upstream/lib/libssh2/src/agent.c
     echo upstream/lib/libssh2/src/channel.c
-    # cipher-chachapoly.c, chacha.c, poly1305.c, blowfish.c,
-    # bcrypt_pbkdf.c are all skipped — they use BSD types (u_int,
-    # u_char) that uc386's libc doesn't ship, and our feature
-    # flags disable ChaCha20 / Blowfish / 3DES anyway.
     echo upstream/lib/libssh2/src/comp.c
     echo upstream/lib/libssh2/src/crypt.c
     echo upstream/lib/libssh2/src/crypto.c
