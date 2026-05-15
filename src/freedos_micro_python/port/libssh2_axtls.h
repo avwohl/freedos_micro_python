@@ -73,6 +73,11 @@
  * which we don't expose). */
 #define EC_MAX_POINT_LEN ((528 * 2 / 8) + 1)
 
+/* Max RSA / DH bigint modulus libssh2 will accept. 2048 bits is
+   enough for axtls's RSA (which our backend uses); larger DH
+   groups (group14: 2048, group16: 4096) are outside our scope. */
+#define LIBSSH2_DH_MAX_MODULUS_BITS 2048
+
 /* ------------------------------------------------------------------
  * Generic init / random.
  * ------------------------------------------------------------------ */
