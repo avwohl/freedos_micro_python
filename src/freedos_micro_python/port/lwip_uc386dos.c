@@ -156,6 +156,7 @@ static err_t uc386dos_eth_netif_init_cb(struct netif *netif) {
 // 0x83 sim active, drain `ethdrv_recv` instead. The two never
 // coexist in a single boot.
 static void uc386dos_eth_pump_rx(void) {
+    extern int write(int fd, const void *buf, unsigned int n);
     if (!uc386dos_eth_active) {
         return;
     }
@@ -168,14 +169,28 @@ static void uc386dos_eth_pump_rx(void) {
         if (len == 0) {
             break;
         }
+        write(1, "[ep:", 4);
+        char lenbuf[6];
+        unsigned int l = len;
+        lenbuf[0] = '0' + ((l / 1000) % 10);
+        lenbuf[1] = '0' + ((l / 100) % 10);
+        lenbuf[2] = '0' + ((l / 10) % 10);
+        lenbuf[3] = '0' + (l % 10);
+        lenbuf[4] = ']';
+        write(1, lenbuf, 5);
         struct pbuf *p = pbuf_alloc(PBUF_RAW, (u16_t)len, PBUF_POOL);
         if (p == NULL) {
+            write(1, "[ep:noalloc]", 12);
             // Drop the frame; lwIP will time out and retransmit.
             continue;
         }
         pbuf_take(p, uc386dos_eth_rx_buf, (u16_t)len);
-        if (uc386dos_eth_netif.input(p, &uc386dos_eth_netif) != ERR_OK) {
+        err_t er = uc386dos_eth_netif.input(p, &uc386dos_eth_netif);
+        if (er != ERR_OK) {
+            write(1, "[ep:iE]", 7);
             pbuf_free(p);
+        } else {
+            write(1, "[ep:iO]", 7);
         }
     }
 }

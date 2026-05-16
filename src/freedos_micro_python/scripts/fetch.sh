@@ -574,6 +574,116 @@ patch_libssh2_crypto_dispatch() {
     ' "$F" > "$F.tmp" && mv "$F.tmp" "$F"
 }
 
+# Bracket each state transition in axtls's do_clnt_handshake with
+# write(1, "[xx]", N) markers so the TLS rig log shows exactly which
+# function call hangs. Diagnostic-only — paired with an entry in
+# build_port.sh's removal list once the regression is fixed. Markers
+# are emitted ONLY during the handshake itself (no per-record cost
+# on the steady-state read/write path). Idempotent.
+patch_axtls_handshake_markers() {
+    F_CLNT="upstream/lib/axtls/ssl/tls1_clnt.c"
+    F_OSP="upstream/extmod/axtls-include/axtls_os_port.h"
+    [ -f "$F_CLNT" ] || return 0
+    if grep -q "uc386-dos: handshake markers" "$F_CLNT"; then
+        return 0
+    fi
+    echo "micropython: instrumenting axtls handshake with write() markers …"
+
+    # Pull <unistd.h> into every axtls TU via the os_port wrapper so
+    # write() is declared. Mirrors patch_axtls_endian_include's shape.
+    if [ -f "$F_OSP" ] && ! grep -q "<unistd.h>" "$F_OSP"; then
+        sed -i.bak \
+            's|^#include <errno.h>$|#include <errno.h>\
+#include <unistd.h>|' \
+            "$F_OSP"
+        rm -f "$F_OSP.bak"
+    fi
+
+    # Bracket each switch-case in do_clnt_handshake with markers. The
+    # CCS+Finished compound condition is refactored into nested ifs so
+    # we can place a marker between the two calls; semantics preserved
+    # (send_finished still only runs when send_change_cipher_spec
+    # returned SSL_OK).
+    awk '
+        /^int do_clnt_handshake\(SSL \*ssl, int handshake_type, uint8_t \*buf, int hs_len\)$/ {
+            in_func = 1
+            print
+            next
+        }
+        in_func && /^    int ret;$/ {
+            print
+            print "    write(1, \"[hsE]\", 5);  /* uc386-dos: handshake markers */"
+            next
+        }
+        in_func && /^            ret = process_server_hello\(ssl\);$/ {
+            print "            write(1, \"[Sh]\", 4);"
+            print
+            print "            write(1, \"[Sh+]\", 5);"
+            next
+        }
+        in_func && /^            ret = process_certificate\(ssl, &ssl->x509_ctx\);$/ {
+            print "            write(1, \"[Ct]\", 4);"
+            print
+            print "            write(1, \"[Ct+]\", 5);"
+            next
+        }
+        in_func && /^        case HS_SERVER_HELLO_DONE:$/ {
+            print
+            print "            write(1, \"[Hd]\", 4);"
+            next
+        }
+        in_func && /^            if \(\(ret = process_server_hello_done\(ssl\)\) == SSL_OK\)$/ {
+            print
+            expect_brace = 1
+            next
+        }
+        in_func && expect_brace && /^            \{$/ {
+            print
+            print "                write(1, \"[Hd+]\", 5);"
+            expect_brace = 0
+            next
+        }
+        # 20-char indent identifies the else-branch call (the CERT_REQ-
+        # gated one sits at 24-char indent inside a different if).
+        in_func && /^                    ret = send_client_key_xchg\(ssl\);$/ {
+            print "                    write(1, \"[Kx]\", 4);"
+            print
+            print "                    write(1, \"[Kx+]\", 5);"
+            next
+        }
+        # Absorb the 5-line CCS+Finished compound condition and replace
+        # with nested ifs that take markers in between.
+        in_func && /^                if \(ret == SSL_OK && $/ {
+            getline _l2
+            getline _l3
+            getline _l4
+            getline _l5
+            print "                if (ret == SSL_OK) {"
+            print "                    write(1, \"[Cs]\", 4);"
+            print "                    ret = send_change_cipher_spec(ssl);"
+            print "                    write(1, \"[Cs+]\", 5);"
+            print "                    if (ret == SSL_OK) {"
+            print "                        write(1, \"[Fi]\", 4);"
+            print "                        ret = send_finished(ssl);"
+            print "                        write(1, \"[Fi+]\", 5);"
+            print "                    }"
+            print "                }"
+            next
+        }
+        in_func && /^    return ret;$/ {
+            print "    write(1, \"[hsX]\", 5);"
+            print
+            next
+        }
+        in_func && /^\}$/ {
+            in_func = 0
+            print
+            next
+        }
+        { print }
+    ' "$F_CLNT" > "$F_CLNT.tmp" && mv "$F_CLNT.tmp" "$F_CLNT"
+}
+
 patch_axtls_time_dos_int21() {
     F1="upstream/lib/axtls/ssl/tls1_clnt.c"
     F2="upstream/lib/axtls/ssl/tls1.c"
@@ -680,6 +790,7 @@ if [ -d upstream ]; then
     patch_axtls_get_random_dos_int21
     patch_axtls_time_dos_int21
     patch_axtls_x509_gettimeofday
+    patch_axtls_handshake_markers
     patch_libssh2_crypto_dispatch
     patch_libssh2_callback_macros
     patch_libssh2_bsd_types
@@ -718,6 +829,7 @@ patch_axtls_endian_include
 patch_axtls_get_random_dos_int21
 patch_axtls_time_dos_int21
 patch_axtls_x509_gettimeofday
+patch_axtls_handshake_markers
 patch_libssh2_crypto_dispatch
 patch_libssh2_callback_macros
 patch_libssh2_bsd_types

@@ -27,15 +27,57 @@ committed; nothing in the working tree.
 ## What's broken
 
 - **TLS rig regression** (`rigs/tls-rig/run-tls-rig.sh`). TLSTEST.PY hangs at
-  `ctx_ready` (wrap_socket). Pcap shows Client Hello + Server cert response +
-  ACK on the wire — hang is inside MP/axtls's post-cert handling.
-  - Bisected to NOT be caused by libssh2 source inclusion: build_port.sh with
-    libssh2 sources commented out produces a byte-identical 452,492-byte
-    micropython.bin and the rig still hangs.
-  - Cause unidentified; likely a subtle codegen change in some axtls
-    function from the uc386 scope-frame fix or the compll-dedup fix, OR
-    environmental (host OpenSSL 3.6.2 dropping TLSv1.0 support, qemu state,
-    etc.).
+  `ctx_ready` (wrap_socket). Pcap shows Client Hello + Server cert response —
+  but on current builds, **client never ACKs the 915-byte response**. Server
+  retransmits 5+ times with exponential backoff, then gives up.
+  - Environmental ruled out 2026-05-16: host OpenSSL 3.6.2 + `tls_server.py`
+    handshakes cleanly against `openssl s_client -tls1 -cipher
+    'AES128-SHA:@SECLEVEL=0'`. TLSv1.0 still works.
+  - libssh2 source ruled out (earlier WIP entry): byte-identical binary
+    without libssh2 sources still hangs.
+  - DPMI 0x0303 callback (commit `7f23f1c`) ruled out 2026-05-16: patched
+    that line out, rebuilt, same hang.
+  - rmstub memcpy race ruled out 2026-05-16: masked NIC IRQs around
+    `pktdrv_poll_rmstub`'s memcpy + `*st_pending = 0` store, same hang.
+  - uc386 codegen `73b99df` (compll-dedup) ruled out 2026-05-16:
+    checked out `src/uc386/codegen.py` to `73b99df~1` and rebuilt;
+    same hang. (Restored after the test; uc386 tree clean.)
+  - **Diagnostic narrowing (2026-05-16):** added markers `[ep:NNNN]` in
+    `uc386dos_eth_pump_rx` per packet, `[trEnter]`/`[trWait]`/`[trL]`/`[trCb]`
+    in `lwip_tcp_receive` + `_lwip_tcp_recv`, `[hsE]`..`[Fi+]` in axtls
+    `do_clnt_handshake` via `patch_axtls_handshake_markers` in fetch.sh.
+    Markers show:
+    - Small packets (60, 64 byte) reach `uc386dos_eth_pump_rx` and lwIP
+      accepts them (`[ep:iO]`).
+    - The 973-byte server response is **never seen by `uc386dos_eth_pump_rx`**
+      — but NE2000 `BNRY` register advances by 4 pages each retransmit
+      (Crynwr consumed it from the NIC ring).
+    - `_lwip_tcp_recv` (`[trCb]`) is never called.
+    - `do_clnt_handshake` (`[hsE]`) is never reached.
+    - Conclusion: the rmstub at `thunk_seg:0x10` is dropping the 973-byte
+      packets at phase 0 (returning `ES:DI = 0:0`). Crynwr discards them
+      and advances BNRY anyway. Single-slot pending=1 race is the
+      strongest remaining hypothesis but IRQ-masking the drain didn't
+      fix it.
+  - Next ideas worth trying (each costs ~25-min rebuild):
+    a. Revert uc386 `73b99df codegen: _compound_assign_ll reuses existing
+       __compll_* slots` — could be miscompiling something in the RX path
+       (untested).
+    b. Revive 51b52e1's 2-slot RX ring; revisit the e83c45b
+       `[ps:in]`→`[ps:post-dpmi]` send hang since intervening commits
+       may have fixed it.
+    c. Add diagnostic markers in `pktdrv_poll_rmstub` for st_pending /
+       st_length and in Crynwr's phase 0 path (real-mode asm — would
+       need a fixed real-mode print routine).
+    d. Bisect from `e83c45b` (known-passing per its commit message) to
+       HEAD across uc386 + freedos repos.
+  - Current diagnostic state in working tree (uncommitted as of
+    2026-05-16): `port/lwip_uc386dos.c` has `[ep:NNNN]`/`[ep:iO]`/`[ep:iE]`
+    markers; `scripts/fetch.sh` has `patch_axtls_handshake_markers`
+    function that injects `[hsE]`..`[Fi+]` markers in axtls
+    `do_clnt_handshake`. Markers can stay (re-applied on every fetch via
+    fetch.sh) — they don't affect correctness, only add ~30 bytes per
+    received packet of COM1 output.
   - **wget rig** at `rigs/tls-rig/run-wget-rig.sh` hits the same hang (it
     uses the same axtls TLS path).
 
