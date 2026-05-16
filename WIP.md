@@ -85,38 +85,59 @@ committed; nothing in the working tree.
 
 In rough order of effort/value:
 
-1. **Fix TLS regression** — needs hands-on binary diff (we don't have a
-   passing binary saved). Useful approach: instrument
-   `axtls/ssl/tls1.c:do_clnt_handshake` post-`HS_CERTIFICATE` with `write(1,
-   "[hs:N]", N)` markers via fetch.sh patch and rebuild — narrows the hang
-   to a specific axtls call within ~3 build cycles.
+1. **Finish SSH KEX hash-verify** — 2026-05-16 session landed the
+   SSH stack through KEX_ECDH_REPLY + ed25519 hostkey init +
+   curve25519 shared secret K (commits `be1985e` + `2e6219e`).
+   Final gap: between `[cv:kB]` (K stored in bn) and the point
+   where libssh2 should call `session->hostkey->sig_verify`,
+   `[ed:vE]` (our `_libssh2_axtls_ed25519_verify` entry marker)
+   never fires.  libssh2 reports `LIBSSH2_ERROR_KEX_FAILURE` (-8)
+   at `[s:A]`.  Next diagnostic round: instrument
+   `_libssh2_axtls_hash_update` / `_libssh2_axtls_hash_final` (the
+   only points where the `LIBSSH2_KEX_METHOD_EC_SHA_HASH_CREATE_VERIFY`
+   macro's `hok` could fall to 0).
+   - Rig at `rigs/ssh-rig/run-ssh-rig.sh` — paramiko Ed25519 host
+     key + password auth (testuser / testpass).
+   - To resume: `freedos-micropython --workdir /private/tmp/fdmp-build
+     port` (the build tree gets wiped on tmp clean; everything is
+     re-fetched cleanly via `scripts/fetch.sh`).
+   - **Do not put back `-DPKTDRV_FORCE_CRYNWR=1`** in
+     `scripts/build_port.sh` for the SSH path — Crynwr + the rmstub
+     bounce-buffer drop the 920-byte server-banner+KEXINIT packet.
+     PM-native NE2000 (FORCE_CRYNWR=0) is what makes the KEX wire
+     path go through.
 
-2. **Real RSA/DH/key-parse implementations** in
-   `port/libssh2_axtls.c` (currently all stubs at lines ~280–470). Most
-   ones needed:
+2. **Restore TLS rig** — previously regressed (see "What's broken"
+   above).  May or may not share root cause with the SSH
+   hash-verify gap.  Try with PM-native NE2000 (drop FORCE_CRYNWR
+   from build_port.sh — already done as of `be1985e`) and check
+   if the TLS rig too completes further; the rmstub drop bug at
+   the rmstub level was the dominant blocker.
+
+3. **Real RSA/DH/key-parse implementations** in
+   `port/libssh2_axtls.c`. Lines ~440–620; bn_* and curve25519_gen_k
+   are now real (commit `be1985e`), RSA/DH still stubs:
    - `_libssh2_axtls_rsa_new` — wrap raw n/e/d into `RSA_CTX` via
      `RSA_pub_key_new` / `RSA_priv_key_new`.
    - `_libssh2_axtls_rsa_sha{1,2}_sign` — `RSA_encrypt` with priv key
      + PKCS#1 v1.5 padding.
-   - `_libssh2_axtls_rsa_sha{1,2}_verify` — call axtls's `RSA_verify`.
+   - `_libssh2_axtls_rsa_sha{1,2}_verify` — call axtls's `RSA_decrypt`
+     with `is_decryption=0` + DER prefix match (SHA1/256/384/512).
    - `_libssh2_axtls_pub_priv_keyfile{,memory}` — PEM parser; axtls's
      `loader.c` already does PKCS#1 / PKCS#8.
-   - `_libssh2_axtls_dh_*` and `_libssh2_axtls_bn_*` — wrap axtls's
-     bigint API.
+   - `_libssh2_axtls_dh_*` — wrap axtls's bigint API for
+     diffie-hellman-group* KEX fallback when curve25519 isn't
+     negotiated.  Optional — modssh restricts KEX to curve25519
+     so this is only needed for interop with old SSH servers.
 
-3. **Expand `_ssh` MP API** with Session/Channel/SFTP wrappers in
-   `port/modssh_uc386dos.c`. Pattern lives in
-   `port/modtls_axtls_uc386dos.c` (SSLContext + SSLSocket types).
-   Minimum useful surface:
-   - `_ssh.Session(socket)` → does handshake on a connected socket
-   - `session.userauth_password(user, pw)`
+4. **Expand `_ssh` MP API** with SFTP wrapper in
+   `port/modssh_uc386dos.c`.  Session / userauth_password / exec /
+   close already landed (commit `be1985e`); SFTP not yet:
    - `session.sftp()` → SFTP object
    - `sftp.open(path, mode)`, `sftp.read/write/close`
 
-4. **Python wrappers** at `examples/{sftp,scp}.py` — paramiko-shaped
+5. **Python wrappers** at `examples/{sftp,scp}.py` — paramiko-shaped
    interface on top of `_ssh`. Same shape as `examples/wget.py`.
-
-5. **`run-ssh-rig.sh`** — host-side OpenSSH + qemu+FreeDOS MP rig.
    Model: copy `run-wget-rig.sh`, swap the tls_server.py for sshd
    (via openssh's `/usr/sbin/sshd -p PORT -h KEYFILE -D`). Test
    uploads + downloads round-trip a known marker.
