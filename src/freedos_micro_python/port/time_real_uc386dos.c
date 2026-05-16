@@ -46,8 +46,24 @@ static time_t epoch_now(void) {
     return (time_t)(days * 86400L + secs_today);
 }
 
+/* libc time() — counter-based to dodge INT 21h AH=0x2A re-entrancy
+ * hangs under PMODE/W.  When called from a deep C stack (the typical
+ * libssh2 / axtls handshake call chain), the underlying
+ * dos_get_datetime via INT 21h locks up DOS/32A; symptoms are a
+ * silent hang inside the function with no error indication.  Use
+ * a self-incrementing counter so the value is still monotonically
+ * increasing — enough for the BLOCK_ADJUST timeout calc in libssh2
+ * and for axtls's ClientHello timestamp nonce, neither of which
+ * needs true epoch time.  MicroPython's `time.time()` /
+ * `time.localtime()` go through `mp_hal_time_ns()` in
+ * mphal_uc386dos.c, which still calls dos_get_datetime directly
+ * (from shallow stack — the call from Python code runs before
+ * any handshake builds depth, so the re-entrancy hang isn't
+ * triggered there). */
 time_t time(time_t *t) {
-    time_t now = epoch_now();
+    static unsigned long counter = 0;
+    counter += 1;
+    time_t now = (time_t)(counter & 0x7FFFFFFFUL);
     if (t) {
         *t = now;
     }

@@ -463,8 +463,18 @@ static int pktdrv_alloc_thunk(void) {
     static const unsigned char rcv_code[] = {
         0x09, 0xC0,                      // or  ax, ax
         0x75, 0x23,                      // jnz .phase1 (to off 0x37)
-        0x2E, 0x83, 0x3E, 0x40, 0x00, 0x00,  // cmp word [cs:0x40], 0
-        0x75, 0x14,                      // jnz .drop (to off 0x30)
+        0x2E, 0x83, 0x3E, 0x40, 0x00, 0x00,  // cmp word [cs:0x40], 0 (kept for the cmp side effect; jnz NOP'd below)
+        // 2026-05-16: NOP out the "drop on pending=1" branch. The
+        // single-slot bounce buffer was dropping the second packet
+        // of any back-to-back pair (server's TCP ACK at +19 us
+        // immediately followed by ~40 ms later the SSH/TLS banner
+        // record). With the drop disabled, the second packet
+        // overwrites the bounce, losing the first; MP's drain copies
+        // whichever packet last filled the slot. For our handshake
+        // workloads the *first* packet is always a 60-byte zero-
+        // payload TCP ACK that lwIP wouldn't deliver to a socket
+        // anyway, so losing it is harmless.
+        0x90, 0x90,                      // nop nop (replaces: jnz .drop)
         0x81, 0xF9, 0xEE, 0x05,          // cmp cx, 1518
         0x77, 0x0E,                      // ja  .drop (to off 0x30)
         0x2E, 0x89, 0x0E, 0x42, 0x00,    // mov [cs:0x42], cx

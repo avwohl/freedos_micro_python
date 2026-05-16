@@ -350,12 +350,25 @@ typedef struct {
 typedef void _libssh2_bn;
 typedef _libssh2_bn_ctx _libssh2_dh_ctx;
 
+/* libssh2 calls these by their public name (`libssh2_dh_*`, no
+ * leading underscore). The other backend headers (openssl.h,
+ * libgcrypt.h, mbedtls.h) alias the public name to a private
+ * impl `_libssh2_dh_*` and then declare the impl as a function;
+ * for us we collapse both names directly onto the `_libssh2_axtls_*`
+ * impl. */
 #define _libssh2_dh_init(dhctx)  _libssh2_axtls_dh_init(dhctx)
 #define _libssh2_dh_key_pair(dhctx, public, g, p, group_order, bnctx) \
     _libssh2_axtls_dh_key_pair(dhctx, public, g, p, group_order, bnctx)
 #define _libssh2_dh_secret(dhctx, secret, f, p, bnctx) \
     _libssh2_axtls_dh_secret(dhctx, secret, f, p, bnctx)
 #define _libssh2_dh_dtor(dhctx)  _libssh2_axtls_dh_dtor(dhctx)
+
+#define libssh2_dh_init(dhctx)   _libssh2_axtls_dh_init(dhctx)
+#define libssh2_dh_key_pair(dhctx, public, g, p, group_order, bnctx) \
+    _libssh2_axtls_dh_key_pair(dhctx, public, g, p, group_order, bnctx)
+#define libssh2_dh_secret(dhctx, secret, f, p, bnctx) \
+    _libssh2_axtls_dh_secret(dhctx, secret, f, p, bnctx)
+#define libssh2_dh_dtor(dhctx)   _libssh2_axtls_dh_dtor(dhctx)
 
 #define _libssh2_bn_init() _libssh2_axtls_bn_init()
 #define _libssh2_bn_init_from_bin() _libssh2_bn_init()

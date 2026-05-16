@@ -29,6 +29,96 @@
 #define _AS_AES(c)    ((AES_CTX *)((c)->storage))
 
 /* ------------------------------------------------------------------
+ * Linkage stubs for chachapoly_*.
+ *
+ * libssh2's crypt.c references these three for chacha20-poly1305@
+ * openssh.com cipher dispatch even though build_port.sh skips
+ * cipher-chachapoly.c / chacha.c / poly1305.c (uc386 doesn't
+ * compile the chacha sources cleanly).  modssh_uc386dos.c restricts
+ * the cipher preferences to AES-CTR variants so chachapoly_*
+ * never actually runs.  Stubs make the link resolve.
+ * ------------------------------------------------------------------ */
+struct chachapoly_ctx;  /* opaque — we never touch the bytes */
+
+int chachapoly_init(struct chachapoly_ctx *cpctx,
+                     const unsigned char *key, unsigned int keylen) {
+    (void)cpctx; (void)key; (void)keylen;
+    return -1;
+}
+
+int chachapoly_crypt(struct chachapoly_ctx *cpctx, unsigned int seqnr,
+                     unsigned char *dest, const unsigned char *src,
+                     unsigned int len, unsigned int aadlen,
+                     int do_encrypt) {
+    (void)cpctx; (void)seqnr; (void)dest; (void)src;
+    (void)len; (void)aadlen; (void)do_encrypt;
+    return -1;
+}
+
+int chachapoly_get_length(struct chachapoly_ctx *cpctx,
+                          unsigned int *plenp, unsigned int seqnr,
+                          const unsigned char *cp, unsigned int len) {
+    (void)cpctx; (void)plenp; (void)seqnr; (void)cp; (void)len;
+    return -1;
+}
+
+/* ------------------------------------------------------------------
+ * Linkage stubs for libc difftime / select.
+ *
+ * uc386's libc declares these (time.h / sys/select.h) but doesn't
+ * ship implementations — they're typically in glibc's networking
+ * layer rather than the core libc, which uc386 doesn't model.
+ * libssh2's session.c references both:
+ *   - `difftime(now, start_time)` for elapsed-ms calculation in
+ *     wait-on-poll loops (we use blocking I/O via callbacks; the
+ *     wait paths never run, but the symbol still gets emitted).
+ *   - `select((int)(fd+1), readfd, writefd, NULL, &tv)` for the
+ *     wait-for-readable / wait-for-writable paths inside
+ *     libssh2_session_block_directions; again, not reached when
+ *     callbacks are blocking, but still linked.
+ * ------------------------------------------------------------------ */
+
+#include <time.h>
+#include <sys/select.h>
+
+double difftime(time_t time1, time_t time0) {
+    /* Simple seconds-difference. axtls's time_t is `long` on this
+     * port; subtraction fits a double for any reasonable elapsed
+     * window. */
+    return (double)(time1 - time0);
+}
+
+int select(int nfds, fd_set *readfds, fd_set *writefds,
+           fd_set *exceptfds, struct timeval *timeout) {
+    (void)nfds; (void)readfds; (void)writefds; (void)exceptfds;
+    (void)timeout;
+    /* libssh2's callback-based I/O path never reaches here. */
+    return -1;
+}
+
+/* ------------------------------------------------------------------
+ * Linkage stubs for POSIX recv/send.
+ *
+ * libssh2's misc.c provides default _libssh2_recv / _libssh2_send
+ * that wrap POSIX recv() and send(). The MP port replaces these via
+ * LIBSSH2_CALLBACK_SEND / LIBSSH2_CALLBACK_RECV (see
+ * port/modssh_uc386dos.c), so the wrappers are never actually
+ * called at runtime — but they're still referenced from libssh2's
+ * object code, so the symbols must resolve at link time. The uc386
+ * libc doesn't ship socket-API recv/send (those would normally
+ * come from libnsl / glibc's BSD-sockets layer), so we provide
+ * inert stubs here.
+ * ------------------------------------------------------------------ */
+ssize_t recv(int sockfd, void *buf, size_t len, int flags) {
+    (void)sockfd; (void)buf; (void)len; (void)flags;
+    return -1;
+}
+ssize_t send(int sockfd, const void *buf, size_t len, int flags) {
+    (void)sockfd; (void)buf; (void)len; (void)flags;
+    return -1;
+}
+
+/* ------------------------------------------------------------------
  * Generic init / random.
  * ------------------------------------------------------------------ */
 int _libssh2_axtls_init(void) {
@@ -268,30 +358,53 @@ void _libssh2_axtls_cipher_dtor(_libssh2_cipher_ctx *ctx) {
  * Curve25519 KEX (TweetNaCl).
  * ------------------------------------------------------------------ */
 
+/* Note: libssh2's _libssh2_curve25519_new takes pointer-to-pointer
+ * (the openssl backend's contract); we allocate the buffers and
+ * store them at *out_*. Earlier signature took `uint8_t pk[32]`
+ * which silently received `unsigned char **`, and our scalarmult
+ * scribbled 32 bytes across the caller's struct instead of into
+ * a real buffer — symptom was an all-zero pubkey on the wire and
+ * "Error computing shared key" from the peer. */
 int _libssh2_axtls_curve25519_new(LIBSSH2_SESSION *session,
-                                    uint8_t public_key[32],
-                                    uint8_t private_key[32]) {
+                                    unsigned char **out_public_key,
+                                    unsigned char **out_private_key) {
+    extern int write(int fd, const void *buf, unsigned int n);
+    write(1, "[cv:nE]", 7);
+    unsigned char *priv = (unsigned char *)LIBSSH2_ALLOC(session, 32);
+    unsigned char *pub  = (unsigned char *)LIBSSH2_ALLOC(session, 32);
+    if (!priv || !pub) {
+        if (priv) LIBSSH2_FREE(session, priv);
+        if (pub)  LIBSSH2_FREE(session, pub);
+        return -1;
+    }
     /* Generate a random scalar; clamp per RFC 7748. */
-    _libssh2_axtls_random(private_key, 32);
-    private_key[0]  &= 248;
-    private_key[31] &= 127;
-    private_key[31] |= 64;
+    _libssh2_axtls_random(priv, 32);
+    priv[0]  &= 248;
+    priv[31] &= 127;
+    priv[31] |= 64;
     /* Compute the public key = X25519(private, basepoint). */
-    crypto_scalarmult_base(public_key, private_key);
-    (void)session;
+    crypto_scalarmult_base(pub, priv);
+    write(1, "[cv:nM]", 7);
+    *out_public_key  = pub;
+    *out_private_key = priv;
     return 0;
 }
 
 int _libssh2_axtls_curve25519_gen_k(_libssh2_bn **k,
                                       uint8_t private_key[32],
                                       uint8_t server_public_key[32]) {
-    /* k = X25519(private, server_public). Output is a 32-byte
-       shared secret. libssh2 wraps it as a bigint for the
-       transport-layer mix. */
-    (void)k;
-    (void)private_key;
-    (void)server_public_key;
-    return -1;  /* TODO: wire to _libssh2_axtls_bn_from_bin */
+    extern int write(int fd, const void *buf, unsigned int n);
+    write(1, "[cv:kE]", 7);
+    if (!k || !*k) return -1;
+    uint8_t secret[32];
+    if (crypto_scalarmult(secret, private_key, server_public_key) != 0) {
+        write(1, "[cv:kFail]", 10);
+        return -1;
+    }
+    write(1, "[cv:kM]", 7);
+    int rc = _libssh2_axtls_bn_from_bin(*k, 32, secret);
+    write(1, "[cv:kB]", 7);
+    return rc;
 }
 
 /* ------------------------------------------------------------------
@@ -316,6 +429,8 @@ int _libssh2_axtls_ed25519_verify(libssh2_ed25519_ctx *ctx,
                                     const unsigned char *sig,
                                     size_t sig_len,
                                     const unsigned char *m, size_t m_len) {
+    extern int write(int fd, const void *buf, unsigned int n);
+    write(1, "[ed:vE]", 7);
     /* TweetNaCl's crypto_sign_open expects a signed message
        (sig || message). Concatenate, then verify. */
     if (sig_len != 64) return -1;
@@ -330,6 +445,37 @@ int _libssh2_axtls_ed25519_verify(libssh2_ed25519_ctx *ctx,
     free(sm);
     free(out);
     return (r == 0) ? 0 : -1;
+}
+
+/* Ed25519 signing stubs. We're an SSH client and never present an
+ * Ed25519 user identity — host-key verify (above) is the only side
+ * we exercise. libssh2's hostkey.c still references the sign /
+ * load-private symbols even for client builds; provide stubs that
+ * fail cleanly. */
+int _libssh2_axtls_ed25519_new_private(libssh2_ed25519_ctx **ed_ctx,
+                                         struct _LIBSSH2_SESSION *session,
+                                         const char *filename,
+                                         const uint8_t *passphrase) {
+    (void)ed_ctx; (void)session; (void)filename; (void)passphrase;
+    return -1;
+}
+
+int _libssh2_axtls_ed25519_new_private_frommemory(
+        libssh2_ed25519_ctx **ed_ctx,
+        struct _LIBSSH2_SESSION *session,
+        const char *filedata, size_t filedata_len,
+        unsigned const char *passphrase) {
+    (void)ed_ctx; (void)session; (void)filedata; (void)filedata_len; (void)passphrase;
+    return -1;
+}
+
+int _libssh2_axtls_ed25519_sign(libssh2_ed25519_ctx *ctx,
+                                  struct _LIBSSH2_SESSION *session,
+                                  uint8_t **out_sig, size_t *out_sig_len,
+                                  const uint8_t *message, size_t message_len) {
+    (void)ctx; (void)session; (void)out_sig; (void)out_sig_len;
+    (void)message; (void)message_len;
+    return -1;
 }
 
 void _libssh2_axtls_ed25519_free(libssh2_ed25519_ctx *ctx) {
@@ -486,23 +632,114 @@ void _libssh2_axtls_dh_dtor(_libssh2_dh_ctx *dhctx) {
 }
 
 /* ------------------------------------------------------------------
- * Bignum helpers — stubs.
+ * Bignum — byte-array implementation.
+ *
+ * libssh2 uses _libssh2_bn only for (a) loading raw bytes in, (b)
+ * reading them back out, and (c) querying byte/bit length for SSH
+ * mpint encoding.  It does NOT do arithmetic on bn objects when our
+ * KEX is Curve25519 (the math is all inside the tweetnacl scalarmult).
+ * A trivial big-endian byte buffer covers the entire use surface for
+ * that path; full arithmetic would only be needed for diffie-hellman-
+ * group* KEX, which the SSH client config can skip via algorithm
+ * preferences.
+ *
+ * Stored without leading zero bytes so `bytes` / `bits` mirror what
+ * BN_num_bytes / BN_num_bits return in the OpenSSL backend (which
+ * libssh2's kex.c reads to decide whether to prepend an mpint 0x00).
  * ------------------------------------------------------------------ */
 
-_libssh2_bn *_libssh2_axtls_bn_init(void) { return NULL; }
+typedef struct {
+    int len;                 /* bytes stored (no leading zeros) */
+    int cap;                 /* allocated capacity of data       */
+    unsigned char *data;     /* big-endian payload               */
+} _bn_impl;
+
+_libssh2_bn *_libssh2_axtls_bn_init(void) {
+    _bn_impl *bn = (_bn_impl *)calloc(1, sizeof(*bn));
+    return (_libssh2_bn *)bn;
+}
+
+void _libssh2_axtls_bn_free(_libssh2_bn *bn) {
+    if (!bn) return;
+    _bn_impl *b = (_bn_impl *)bn;
+    if (b->data) free(b->data);
+    free(b);
+}
+
+static int _bn_ensure(_bn_impl *b, int need) {
+    if (b->cap >= need) return 0;
+    int newcap = need > 0 ? need : 1;
+    unsigned char *nd = (unsigned char *)malloc(newcap);
+    if (!nd) return -1;
+    if (b->data) free(b->data);
+    b->data = nd;
+    b->cap = newcap;
+    return 0;
+}
+
 void _libssh2_axtls_bn_set_word(_libssh2_bn *bn, unsigned long val) {
-    (void)bn; (void)val;
+    _bn_impl *b = (_bn_impl *)bn;
+    if (!b) return;
+    /* Encode as big-endian, strip leading zeros. */
+    unsigned char tmp[sizeof(val)];
+    int i, n = 0;
+    for (i = (int)sizeof(val) - 1; i >= 0; i--) {
+        unsigned char byte = (unsigned char)((val >> (i * 8)) & 0xFF);
+        if (n == 0 && byte == 0) continue;
+        tmp[n++] = byte;
+    }
+    if (_bn_ensure(b, n) < 0) {
+        b->len = 0;
+        return;
+    }
+    if (n > 0) memcpy(b->data, tmp, n);
+    b->len = n;
 }
+
 int _libssh2_axtls_bn_from_bin(_libssh2_bn *bn, int len, const unsigned char *val) {
-    (void)bn; (void)len; (void)val;
-    return -1;
+    _bn_impl *b = (_bn_impl *)bn;
+    if (!b || len < 0) return -1;
+    /* Strip leading zeros so `bits` reports the true MSB position
+       and `bytes` matches OpenSSL's BN_num_bytes. */
+    while (len > 0 && val[0] == 0) {
+        val++;
+        len--;
+    }
+    if (_bn_ensure(b, len) < 0) return -1;
+    if (len > 0) memcpy(b->data, val, (size_t)len);
+    b->len = len;
+    return 0;
 }
+
 int _libssh2_axtls_bn_to_bin(_libssh2_bn *bn, unsigned char *val) {
-    (void)bn; (void)val;
-    return -1;
+    _bn_impl *b = (_bn_impl *)bn;
+    if (!b) return 0;
+    if (b->len > 0 && val) memcpy(val, b->data, (size_t)b->len);
+    return b->len;
 }
-int _libssh2_axtls_bn_bytes(_libssh2_bn *bn) { (void)bn; return 0; }
-int _libssh2_axtls_bn_bits(_libssh2_bn *bn) { (void)bn; return 0; }
-void _libssh2_axtls_bn_free(_libssh2_bn *bn) { (void)bn; }
-_libssh2_bn_ctx *_libssh2_axtls_bn_ctx_new(void) { return NULL; }
-void _libssh2_axtls_bn_ctx_free(_libssh2_bn_ctx *ctx) { (void)ctx; }
+
+int _libssh2_axtls_bn_bytes(_libssh2_bn *bn) {
+    _bn_impl *b = (_bn_impl *)bn;
+    return b ? b->len : 0;
+}
+
+int _libssh2_axtls_bn_bits(_libssh2_bn *bn) {
+    _bn_impl *b = (_bn_impl *)bn;
+    if (!b || b->len == 0) return 0;
+    int n_bits = 8 * (b->len - 1);
+    unsigned char msb = b->data[0];
+    while (msb) {
+        n_bits++;
+        msb >>= 1;
+    }
+    return n_bits;
+}
+
+_libssh2_bn_ctx *_libssh2_axtls_bn_ctx_new(void) {
+    /* No per-call state needed for our byte-array bn. */
+    return NULL;
+}
+
+void _libssh2_axtls_bn_ctx_free(_libssh2_bn_ctx *ctx) {
+    (void)ctx;
+}

@@ -1,0 +1,8 @@
+upstream/
+__pycache__/
+freedos-ssh.img
+qemu-ssh.log
+ssh-server.log
+sshtest-wrapped.in
+ssh_host_ed25519
+ssh_host_ed25519.pub

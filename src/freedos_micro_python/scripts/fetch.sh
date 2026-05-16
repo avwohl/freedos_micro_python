@@ -390,10 +390,16 @@ patch_axtls_get_random_dos_int21() {
     echo "micropython: patching axtls get_random to skip INT 21h gettimeofday …"
     awk '
         /gettimeofday\(&tv, NULL\);/ {
-            print "    /* uc386-dos: skip gettimeofday() — see fetch.sh */"
+            print "    /* uc386-dos: skip gettimeofday() — see fetch.sh."
+            print "       Use the 32-bit golden-ratio constant (NOT the"
+            print "       ..7F4A7C15ULL form) — the 64-bit constant trips"
+            print "       uc386 into 64-bit arithmetic that leaves edx live"
+            print "       across statement boundaries, producing garbage"
+            print "       counter increments and effectively-zero entropy."
+            print "       Same fix as patch_axtls_time_dos_int21. */"
             print "    {"
             print "        static unsigned long _rng_counter = 0;"
-            print "        _rng_counter += 0x9E3779B97F4A7C15UL;"
+            print "        _rng_counter += 0x9E3779B9UL;"
             print "        tv.tv_sec = (long)(_rng_counter & 0x7FFFFFFFUL);"
             print "        tv.tv_usec = (long)((_rng_counter >> 16) & 0x7FFFFFFFUL);"
             print "    }"
@@ -476,6 +482,46 @@ patch_libssh2_crypto_engine_enum() {
     echo "micropython: adding libssh2_axtls to libssh2.h crypto_engine_t enum …"
     perl -0777 -i -pe '
         s/(libssh2_os400qc3)(\s*\n\}\s+libssh2_crypto_engine_t)/$1,\n    libssh2_axtls$2/;
+    ' "$F"
+}
+
+# libssh2's LIBSSH2_KEX_METHOD_EC_SHA_HASH_CREATE_VERIFY macro is
+# defined inside `#if LIBSSH2_ECDSA` in kex.c, but is also referenced
+# inside `#if LIBSSH2_ED25519` (curve25519 KEX hash verification).
+# When the backend has ECDSA=0 + ED25519=1 (ours does), the macro
+# isn't defined where it's used and the build fails with "symbol
+# `_LIBSSH2_KEX_METHOD_EC_SHA_HASH_CREATE_VERIFY' not defined".
+#
+# Hoist the macro definition outside the #if LIBSSH2_ECDSA gate so
+# the ED25519 path sees it. The macro itself doesn't depend on
+# ECDSA — it's just a generic hash-and-verify block that both
+# ECDSA and Ed25519 use.
+patch_libssh2_kex_ecsha_macro_hoist() {
+    F="upstream/lib/libssh2/src/kex.c"
+    [ -f "$F" ] || return 0
+    if grep -q "uc386-dos: hoist EC_SHA_HASH macro" "$F"; then
+        return 0
+    fi
+    if ! grep -q "^#define LIBSSH2_KEX_METHOD_EC_SHA_HASH_CREATE_VERIFY" "$F"; then
+        echo "micropython: warn: kex.c EC_SHA_HASH macro shape changed — skipping hoist." >&2
+        return 0
+    fi
+    echo "micropython: hoisting libssh2 kex.c EC_SHA_HASH macro outside #if LIBSSH2_ECDSA …"
+    # Strategy: remove the `#if LIBSSH2_ECDSA` that immediately
+    # precedes (after a blank line) the EC_SHA_HASH macro comment,
+    # and insert a fresh `#if LIBSSH2_ECDSA` after the macro's
+    # closing `} while(0)`. Net effect: macro definition + comment
+    # live outside the gate; ECDSA-specific code that follows stays
+    # gated.
+    perl -0777 -i -pe '
+        s{
+            (\#if\ LIBSSH2_ECDSA\n)        # the gate we are dropping
+            (\n)                            # blank line
+            (/\*\ LIBSSH2_KEX_METHOD_EC_SHA_HASH_CREATE_VERIFY
+                [\s\S]*?
+                \}\ while\(0\)\n)           # entire macro definition
+        }
+        { $2 . $3 . "#if LIBSSH2_ECDSA  /* uc386-dos: hoist EC_SHA_HASH macro outside ECDSA gate (used by ED25519 KEX too) */\n" }gsex;
     ' "$F"
 }
 
@@ -796,6 +842,7 @@ if [ -d upstream ]; then
     patch_libssh2_bsd_types
     patch_libssh2_sftp_handle_enum
     patch_libssh2_crypto_engine_enum
+    patch_libssh2_kex_ecsha_macro_hoist
     exit 0
 fi
 
@@ -835,3 +882,4 @@ patch_libssh2_callback_macros
 patch_libssh2_bsd_types
 patch_libssh2_sftp_handle_enum
 patch_libssh2_crypto_engine_enum
+patch_libssh2_kex_ecsha_macro_hoist
