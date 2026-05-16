@@ -374,7 +374,15 @@ typedef _libssh2_bn_ctx _libssh2_dh_ctx;
 #define _libssh2_bn_init_from_bin() _libssh2_bn_init()
 #define _libssh2_bn_set_word(bn, val) _libssh2_axtls_bn_set_word(bn, val)
 #define _libssh2_bn_from_bin(bn, len, val) _libssh2_axtls_bn_from_bin(bn, len, val)
-#define _libssh2_bn_to_bin(bn, val) _libssh2_axtls_bn_to_bin(bn, val)
+/* OpenSSL's BN_bn2bin returns the bytes written (>0 success, ≤0 fail);
+ * libssh2 wraps it as `(BN_bn2bin(bn, val) <= 0)` so the macro
+ * evaluates to TRUE on failure. Match that semantic — our impl
+ * returns the byte count just like BN_bn2bin, so the macro wraps
+ * the same way. Without this, callers of the shape
+ * `if(_libssh2_bn_to_bin(k, buf)) goto error;` (e.g. kex.c's
+ * curve25519 K serialization) hit the error path on every success
+ * and report KEX_FAILURE post-handshake. */
+#define _libssh2_bn_to_bin(bn, val) (_libssh2_axtls_bn_to_bin(bn, val) <= 0)
 #define _libssh2_bn_bytes(bn) _libssh2_axtls_bn_bytes(bn)
 #define _libssh2_bn_bits(bn) _libssh2_axtls_bn_bits(bn)
 #define _libssh2_bn_free(bn) _libssh2_axtls_bn_free(bn)
