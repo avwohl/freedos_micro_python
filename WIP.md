@@ -85,17 +85,45 @@ committed; nothing in the working tree.
 
 In rough order of effort/value:
 
-1. **Finish SSH KEX hash-verify** — 2026-05-16 session landed the
-   SSH stack through KEX_ECDH_REPLY + ed25519 hostkey init +
-   curve25519 shared secret K (commits `be1985e` + `2e6219e`).
-   Final gap: between `[cv:kB]` (K stored in bn) and the point
-   where libssh2 should call `session->hostkey->sig_verify`,
-   `[ed:vE]` (our `_libssh2_axtls_ed25519_verify` entry marker)
-   never fires.  libssh2 reports `LIBSSH2_ERROR_KEX_FAILURE` (-8)
-   at `[s:A]`.  Next diagnostic round: instrument
-   `_libssh2_axtls_hash_update` / `_libssh2_axtls_hash_final` (the
-   only points where the `LIBSSH2_KEX_METHOD_EC_SHA_HASH_CREATE_VERIFY`
-   macro's `hok` could fall to 0).
+1. **Fix tweetnacl `crypto_scalarmult` arithmetic bug** —
+   2026-05-16 session got SSH all the way to ed25519 verify
+   running end-to-end (commits `be1985e` → `168d6ed`). The
+   remaining gap: client and server compute *different* shared
+   secret K values:
+
+       Client K[0:8] = 585dc06000000000
+       Server K[0:8] = fc886b78b052c0c6
+
+   Bytes 4–7 of our K being all-zero is the tell. `crypto_scalarmult`
+   works when `p` is `_9` (the base point — used by
+   `crypto_scalarmult_base` for our public key, which the server
+   accepts) but produces a wrong result when `p` is a real X25519
+   public key from the server. Most likely a uc386 codegen bug
+   in `M()` or `car25519()` that only manifests when both
+   multiply operands are non-zero (when `p`=`_9`, `b[1..15]=0` so
+   most inner-loop multiplications reduce to `a[i]*0`).
+
+   Concrete next steps:
+   - Write a stand-alone X25519 test vector check (RFC 7748:
+     priv `a546...`, pub `e6db...` should give out `c3da...`).
+     If the test fails on uc386, isolate the smallest input that
+     causes divergence.
+   - Instrument `M()` to dump intermediate `t[i]` values.
+   - Try rewriting compound assigns inside `M()` / `car25519()`
+     as plain stores (same workaround as the `pack25519` fix in
+     `patch_tweetnacl_uc386dos`).
+
+   Diagnostic infrastructure already in tree:
+   - `[K:NNNN]` marker in `_libssh2_axtls_curve25519_gen_k` dumps
+     first 8 bytes of K.
+   - `ssh_server.py` monkey-patches paramiko's
+     `KexCurve25519._perform_exchange` to log the same bytes.
+
+   Stack-frame and `pack25519` codegen issues are fixed
+   (commit `0f51af1`, formalized in
+   `scripts/fetch.sh:patch_tweetnacl_uc386dos`).
+
+   Operational notes:
    - Rig at `rigs/ssh-rig/run-ssh-rig.sh` — paramiko Ed25519 host
      key + password auth (testuser / testpass).
    - To resume: `freedos-micropython --workdir /private/tmp/fdmp-build
