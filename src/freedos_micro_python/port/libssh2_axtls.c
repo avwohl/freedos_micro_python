@@ -155,6 +155,10 @@ int _libssh2_axtls_hash_init(libssh2_axtls_hash_ctx *ctx, int algo) {
         case LIBSSH2_AXTLS_HASH_SHA512: SHA512_Init(_AS_SHA512(ctx)); return 1;
         case LIBSSH2_AXTLS_HASH_MD5:    MD5_Init(_AS_MD5(ctx));       return 1;
     }
+    {
+        extern int write(int fd, const void *buf, unsigned int n);
+        write(1, "[hash:bad-algo]", 15);
+    }
     return 0;
 }
 
@@ -415,13 +419,22 @@ int _libssh2_axtls_ed25519_new_public(libssh2_ed25519_ctx **ed_ctx,
                                         LIBSSH2_SESSION *session,
                                         const unsigned char *raw_pub_key,
                                         const uint8_t key_len) {
+    extern int write(int fd, const void *buf, unsigned int n);
+    write(1, "[ed:nP]", 7);
     (void)session;
-    if (key_len != 32) return -1;
+    if (key_len != 32) {
+        write(1, "[ed:nPlen-bad]", 14);
+        return -1;
+    }
     libssh2_ed25519_ctx *c = (libssh2_ed25519_ctx *)LIBSSH2_CALLOC(session, sizeof(*c));
-    if (!c) return -1;
+    if (!c) {
+        write(1, "[ed:nPalloc-fail]", 17);
+        return -1;
+    }
     memcpy(c->public_key, raw_pub_key, 32);
     c->have_private = 0;
     *ed_ctx = c;
+    write(1, "[ed:nPok]", 9);
     return 0;
 }
 
