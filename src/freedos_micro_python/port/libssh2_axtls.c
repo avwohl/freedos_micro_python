@@ -405,6 +405,19 @@ int _libssh2_axtls_curve25519_gen_k(_libssh2_bn **k,
         write(1, "[cv:kFail]", 10);
         return -1;
     }
+    /* Dump first 8 bytes of K. Compare with paramiko's debug log
+     * (set LOG_LEVEL=DEBUG on the server; paramiko logs the K
+     * value in its kex_curve25519 module). If they differ, our
+     * X25519 has miscomputed the shared secret. */
+    static const char _hx[] = "0123456789abcdef";
+    char _b[24] = "[K:";
+    int _i;
+    for (_i = 0; _i < 8; _i++) {
+        _b[3 + 2*_i]     = _hx[(secret[_i] >> 4) & 0xF];
+        _b[3 + 2*_i + 1] = _hx[secret[_i] & 0xF];
+    }
+    _b[19] = ']';
+    write(1, _b, 20);
     write(1, "[cv:kM]", 7);
     int rc = _libssh2_axtls_bn_from_bin(*k, 32, secret);
     write(1, "[cv:kB]", 7);

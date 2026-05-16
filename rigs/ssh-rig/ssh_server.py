@@ -22,6 +22,13 @@ import time
 from pathlib import Path
 
 import paramiko
+import paramiko.kex_curve25519 as _kc25
+_orig_exchange = _kc25.KexCurve25519._perform_exchange
+def _patched_exchange(self, peer_key):
+    secret = _orig_exchange(self, peer_key)
+    print(f"[ssh-server] K[0:8]={secret[:8].hex()}", flush=True)
+    return secret
+_kc25.KexCurve25519._perform_exchange = _patched_exchange
 
 
 HERE = Path(__file__).resolve().parent
