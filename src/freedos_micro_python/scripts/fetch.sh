@@ -496,6 +496,67 @@ patch_libssh2_crypto_engine_enum() {
 # the ED25519 path sees it. The macro itself doesn't depend on
 # ECDSA — it's just a generic hash-and-verify block that both
 # ECDSA and Ed25519 use.
+# TweetNaCl's curve25519 / ed25519 path has two uc386-dos issues:
+#
+#   (a) Large stack frames in crypto_scalarmult / crypto_sign_open
+#       / add / scalarbase / unpackneg / pack push past PMODE/W's
+#       INT 21h deep-stack threshold. Hoist the i64 / gf locals
+#       to file-static (single-threaded port; no re-entrancy).
+#
+#   (b) uc386's `_compound_assign_ll reuses existing __compll_*`
+#       codegen (commit 73b99df) allocates a hidden snapshot slot
+#       for the LHS of `&=` / `+=` / etc. on i64.  In pack25519's
+#       FOR(j,2) loop the snapshot slot happens to alias the `j`
+#       counter under certain caller stack shapes — symptom is an
+#       infinite loop (observed: 51,350 iterations from
+#       crypto_sign_open's pack→pack25519 call chain).  Rewrite
+#       the `m[i-1] &= 0xffff` / `m[14] &= 0xffff` compound assigns
+#       as plain `m[i-1] = m[i-1] & 0xffff` stores to bypass the
+#       synthetic slot.
+patch_tweetnacl_uc386dos() {
+    F="upstream/lib/tweetnacl/tweetnacl.c"
+    [ -f "$F" ] || return 0
+    if grep -q "uc386-dos: locals moved to file-static" "$F"; then
+        return 0
+    fi
+    echo "micropython: patching tweetnacl for uc386-dos stack frames + compll codegen …"
+    # (a) Stack-frame reductions — file-static the i64 / gf locals.
+    perl -0777 -i -pe '
+        # crypto_scalarmult: hoist u8 z[32], i64 x[80], gf a..f to static.
+        s{(int crypto_scalarmult\(u8 \*q,const u8 \*n,const u8 \*p\)\n\{\n)  u8 z\[32\];\n  i64 x\[80\],r,i;\n  gf a,b,c,d,e,f;\n}
+         {$1  /* uc386-dos: locals moved to file-static — see fetch.sh */\n  static u8 z[32];\n  static i64 x[80];\n  i64 r,i;\n  static gf a,b,c,d,e,f;\n}s;
+
+        # add: hoist all 9 gf locals.
+        s{(sv add\(gf p\[4\],gf q\[4\]\)\n\{\n)  gf a,b,c,d,t,e,f,g,h;\n}
+         {$1  /* uc386-dos: locals moved to file-static */\n  static gf a,b,c,d,t,e,f,g,h;\n}s;
+
+        # scalarbase: hoist gf q[4].
+        s{(sv scalarbase\(gf p\[4\],const u8 \*s\)\n\{\n)  gf q\[4\];\n}
+         {$1  /* uc386-dos: locals moved to file-static */\n  static gf q[4];\n}s;
+
+        # unpackneg: hoist its 7 gf locals.
+        s{(static int unpackneg\(gf r\[4\],const u8 p\[32\]\)\n\{\n)  gf t, chk, num, den, den2, den4, den6;\n}
+         {$1  /* uc386-dos: locals moved to file-static */\n  static gf t, chk, num, den, den2, den4, den6;\n}s;
+
+        # crypto_sign_open: hoist u8 t/h + gf p/q.
+        s{(int crypto_sign_open\(u8 \*m,u64 \*mlen,const u8 \*sm,u64 n,const u8 \*pk\)\n\{\n)  int i;\n  u8 t\[32\],h\[64\];\n  gf p\[4\],q\[4\];\n}
+         {$1  /* uc386-dos: locals moved to file-static */\n  int i;\n  static u8 t[32],h[64];\n  static gf p[4],q[4];\n}s;
+
+        # pack (ed25519): hoist gf tx, ty, zi.
+        s{(sv pack\(u8 \*r,gf p\[4\]\)\n\{\n)  gf tx, ty, zi;\n}
+         {$1  /* uc386-dos: locals moved to file-static */\n  static gf tx, ty, zi;\n}s;
+
+        # (b) pack25519 compound-assign workaround. The j counter
+        # was getting clobbered by the synthetic __compll snapshot
+        # slot for `m[i-1] &= 0xffff` / `m[14] &= 0xffff` under the
+        # sign_open call stack — rewrite as plain stores.
+        s{(    for\(i=1;i<15;i\+\+\) \{\n      m\[i\]=t\[i\]-0xffff-\(\(m\[i-1\]>>16\)&1\);\n)      m\[i-1\]&=0xffff;\n}
+         {$1      m[i-1]=m[i-1]&0xffff;  /* uc386-dos: avoid compll __compll snap-slot clobber of j */\n}s;
+        s{    m\[14\]&=0xffff;\n}
+         {    m[14]=m[14]&0xffff;  /* uc386-dos: see fetch.sh */\n}s;
+    ' "$F"
+}
+
 patch_libssh2_kex_ecsha_macro_hoist() {
     F="upstream/lib/libssh2/src/kex.c"
     [ -f "$F" ] || return 0
@@ -843,6 +904,7 @@ if [ -d upstream ]; then
     patch_libssh2_sftp_handle_enum
     patch_libssh2_crypto_engine_enum
     patch_libssh2_kex_ecsha_macro_hoist
+    patch_tweetnacl_uc386dos
     exit 0
 fi
 
@@ -883,3 +945,4 @@ patch_libssh2_bsd_types
 patch_libssh2_sftp_handle_enum
 patch_libssh2_crypto_engine_enum
 patch_libssh2_kex_ecsha_macro_hoist
+patch_tweetnacl_uc386dos
