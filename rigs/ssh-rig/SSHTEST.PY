@@ -23,11 +23,6 @@ if not info[3] or info[0] == '0.0.0.0':
 addr = socket.getaddrinfo('10.0.2.2', 2222)[0][-1]
 s = socket.socket()
 try:
-    # modlwip aliases TCP_NODELAY to TF_NODELAY (0x40), not POSIX 1.
-    s.setsockopt(socket.IPPROTO_TCP, 0x40, 1)
-except OSError as e:
-    print('SSHTEST: nodelay_setopt_failed', e)
-try:
     s.connect(addr)
 except OSError as e:
     print('SSHTEST: connect_failed', e)

@@ -109,12 +109,15 @@ the test passed.
    `session.sftp()` API in `port/modssh_uc386dos.c`. The exec
    path proves channel I/O works; SFTP is structurally similar.
 
-3. **Replace the `0x40` magic number in SSHTEST.PY's
-   `setsockopt(IPPROTO_TCP, 0x40, 1)`.** `modlwip.c` aliases
-   `TCP_NODELAY` to lwIP's `TF_NODELAY = 0x40`, but POSIX
-   `TCP_NODELAY = 1`. modlwip should either expose `TCP_NODELAY`
-   as a module constant or translate POSIX 1 → TF_NODELAY
-   internally. Upstream MicroPython fix.
+3. **Expose POSIX TCP_NODELAY in modlwip.** modlwip's `case
+   TCP_NODELAY:` switch matches on the lwIP `TF_NODELAY = 0x40`
+   constant, not POSIX `TCP_NODELAY = 1`. Currently nobody needs
+   to set NODELAY (SSHTEST works without it after the EOF→EAGAIN
+   fix), so the gap is cosmetic — but it'll bite anyone porting
+   a POSIX socket program. Upstream MicroPython fix: either
+   expose `socket.TCP_NODELAY` as a module constant equal to
+   `TF_NODELAY`, or translate POSIX 1 → TF_NODELAY inside the
+   setsockopt handler.
 
 ## Run
 
