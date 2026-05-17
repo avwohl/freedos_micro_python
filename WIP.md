@@ -1,237 +1,130 @@
 # WIP — SSH/SCP under freedos_micro_python
 
-Snapshot at HEAD `7ab2359` (freedos) + `73b99df` (uc386). All changes
-committed; nothing in the working tree.
+Snapshot at HEAD `a81028c` (freedos) + `10b4dfd` (uc386).
+
+**SSH end-to-end works.** SSHTEST.PY against the paramiko fixture
+runs handshake_ok → auth_ok → `exec('echo SSH_RIG_OK')` → len=11
+SSH_RIG_OK → PASS, with the test rig exiting cleanly (rc=0).
 
 ## What works
 
 - **libssh2 1.11.1 + TweetNaCl** fetched into `upstream/lib/{libssh2,tweetnacl}/`.
 - **Crypto adapter** (`port/libssh2_axtls.{h,c}`) maps libssh2's `crypto.h`
   API to axtls (SHA1/256/384/512, MD5, HMAC, AES-CBC, AES-CTR) + TweetNaCl
-  (Curve25519 KEX, Ed25519 verify). RSA / DH / key-parse paths are stubs
-  returning `-1`.
-- **All 25 libssh2 .c files compile clean** through uc386 (verified by build
-  #13 onward).
-- **`_ssh` MicroPython module** (`port/modssh_uc386dos.c`) operational —
-  smoke test `test_micropython_import_ssh` PASSES under dos_emu:
-  ```
-  >>> import _ssh
-  >>> _ssh.version()           → '1.11.1'
-  >>> _ssh.crypto_engine_name() → 'axtls'
-  ```
-- **MP.EXE** at `rigs/dosbox-x-rig/MP.EXE` (526,097 bytes, +170 over
-  pre-SSH baseline after DCE).
-- **micropython.bin** at `/private/tmp/fdmp-build/build/micropython.bin`
-  (452,926 bytes).
+  (Curve25519 KEX, Ed25519 verify). RSA / DH / key-parse paths are stubs.
+- **End-to-end SSH from FreeDOS guest to paramiko server** —
+  `rigs/ssh-rig/run-ssh-rig.sh` performs handshake, password auth,
+  exec, and verifies the marker. KEX = curve25519-sha256, hostkey =
+  ssh-ed25519, cipher = aes256-ctr, MAC = hmac-sha2-256.
 
-## What's broken
+## The four fixes that turned the corner this session
 
-- **TLS rig regression** (`rigs/tls-rig/run-tls-rig.sh`). TLSTEST.PY hangs at
-  `ctx_ready` (wrap_socket). Pcap shows Client Hello + Server cert response —
-  but on current builds, **client never ACKs the 915-byte response**. Server
-  retransmits 5+ times with exponential backoff, then gives up.
-  - Environmental ruled out 2026-05-16: host OpenSSL 3.6.2 + `tls_server.py`
-    handshakes cleanly against `openssl s_client -tls1 -cipher
-    'AES128-SHA:@SECLEVEL=0'`. TLSv1.0 still works.
-  - libssh2 source ruled out (earlier WIP entry): byte-identical binary
-    without libssh2 sources still hangs.
-  - DPMI 0x0303 callback (commit `7f23f1c`) ruled out 2026-05-16: patched
-    that line out, rebuilt, same hang.
-  - rmstub memcpy race ruled out 2026-05-16: masked NIC IRQs around
-    `pktdrv_poll_rmstub`'s memcpy + `*st_pending = 0` store, same hang.
-  - uc386 codegen `73b99df` (compll-dedup) ruled out 2026-05-16:
-    checked out `src/uc386/codegen.py` to `73b99df~1` and rebuilt;
-    same hang. (Restored after the test; uc386 tree clean.)
-  - **Diagnostic narrowing (2026-05-16):** added markers `[ep:NNNN]` in
-    `uc386dos_eth_pump_rx` per packet, `[trEnter]`/`[trWait]`/`[trL]`/`[trCb]`
-    in `lwip_tcp_receive` + `_lwip_tcp_recv`, `[hsE]`..`[Fi+]` in axtls
-    `do_clnt_handshake` via `patch_axtls_handshake_markers` in fetch.sh.
-    Markers show:
-    - Small packets (60, 64 byte) reach `uc386dos_eth_pump_rx` and lwIP
-      accepts them (`[ep:iO]`).
-    - The 973-byte server response is **never seen by `uc386dos_eth_pump_rx`**
-      — but NE2000 `BNRY` register advances by 4 pages each retransmit
-      (Crynwr consumed it from the NIC ring).
-    - `_lwip_tcp_recv` (`[trCb]`) is never called.
-    - `do_clnt_handshake` (`[hsE]`) is never reached.
-    - Conclusion: the rmstub at `thunk_seg:0x10` is dropping the 973-byte
-      packets at phase 0 (returning `ES:DI = 0:0`). Crynwr discards them
-      and advances BNRY anyway. Single-slot pending=1 race is the
-      strongest remaining hypothesis but IRQ-masking the drain didn't
-      fix it.
-  - Next ideas worth trying (each costs ~25-min rebuild):
-    a. Revert uc386 `73b99df codegen: _compound_assign_ll reuses existing
-       __compll_* slots` — could be miscompiling something in the RX path
-       (untested).
-    b. Revive 51b52e1's 2-slot RX ring; revisit the e83c45b
-       `[ps:in]`→`[ps:post-dpmi]` send hang since intervening commits
-       may have fixed it.
-    c. Add diagnostic markers in `pktdrv_poll_rmstub` for st_pending /
-       st_length and in Crynwr's phase 0 path (real-mode asm — would
-       need a fixed real-mode print routine).
-    d. Bisect from `e83c45b` (known-passing per its commit message) to
-       HEAD across uc386 + freedos repos.
-  - Current diagnostic state in working tree (uncommitted as of
-    2026-05-16): `port/lwip_uc386dos.c` has `[ep:NNNN]`/`[ep:iO]`/`[ep:iE]`
-    markers; `scripts/fetch.sh` has `patch_axtls_handshake_markers`
-    function that injects `[hsE]`..`[Fi+]` markers in axtls
-    `do_clnt_handshake`. Markers can stay (re-applied on every fetch via
-    fetch.sh) — they don't affect correctness, only add ~30 bytes per
-    received packet of COM1 output.
-  - **wget rig** at `rigs/tls-rig/run-wget-rig.sh` hits the same hang (it
-    uses the same axtls TLS path).
+1. **uc386 codegen — `alloc_local` cache rebind didn't bump
+   `frame_size`** (uc386 commit `10b4dfd`). A user local allocated
+   on the collect-pass at `[ebp-N]` and re-bound on the emit-pass
+   via the `decl_disps` cache silently kept `frame_size` at the
+   pre-bind value, so the next compiler-generated alloc in the
+   same scope (e.g. `__compll_addr_*` from `_compound_assign_ll`)
+   would start from `frame_size = 0` and land on top of the user
+   local. The concrete bite was crypto-algorithms' `sha256_update`:
+   the `for (WORD i = 0; …) { ctx->bitlen += 512; }` loop got its
+   `i` clobbered by the i64 compound-assign address slot once the
+   first transform fired (every 64 bytes). Single-block hashes
+   were correct; everything multi-block (incl. the 1362-byte SSH
+   exchange hash) was wrong. With the fix, `frame_size` advances
+   to `-disp` on cache hit so subsequent allocs land below the
+   cached slot. The existing `fetch.sh` tweetnacl/axtls
+   compound-assign workarounds are now redundant in principle —
+   not yet retired (haven't audited every site).
 
-## Pick-up points
+2. **axtls AES-CTR byte order in `libssh2_axtls.c`.** axtls's
+   `AES_encrypt(uint32_t *data, …)` reads its words as big-endian
+   (`(w >> 24) & 0xFF` etc.). The CTR path cast a raw `uint8_t[16]`
+   counter straight to `uint32_t *` and called `AES_encrypt`
+   without byteswapping; the keystream came back per-word reversed.
+   Server (paramiko) saw garbage and threw "Invalid packet
+   blocking" on the first encrypted SSH packet. Mirror the axtls
+   `AES_cbc_encrypt` shape — `ntohl` the counter words into host
+   order before AES, `htonl` back after — and the cipher matches.
 
-In rough order of effort/value:
+3. **AES-CTR + `AES_convert_key`.** The same path called
+   `AES_convert_key` on the receive-direction context. CTR encrypts
+   the counter in both directions, so the inverse key schedule
+   produces wrong keystream; only CBC decrypt wants it. Skip the
+   call when `is_ctr`.
 
-1. **Find why client H (exchange hash) differs from server H** —
-   The 2026-05-16 session traced the SSH stack all the way through
-   K agreement (commits `13c75be`, `4db8776`).  K matches across
-   client/server every run.  H differs.  Per-update sha256 byte
-   counts match paramiko's `hm.asbytes()` field layout exactly
-   (16 calls total, 1362 hash bytes — same as paramiko); first
-   byte of each field matches the expected SSH-record shape.
+4. **EOF-as-EAGAIN at the libssh2 recv callback** (modssh). After
+   `echo … ; exit` the server sends CHANNEL_DATA + EXIT_STATUS +
+   EOF + CLOSE and then shuts down its TCP write side. lwIP's
+   `recv()` returns 0 on that FIN; libssh2's transport layer maps
+   `recv() == 0` to `SOCKET_RECV` and bails, even when it has
+   already-parsed channel packets sitting in `session->packets`.
+   Return `-EAGAIN` instead so libssh2 falls through to the
+   queue-drain branch in `_libssh2_channel_read`; the buffered
+   CHANNEL_DATA reaches us, and the next read after the drain
+   returns 0 cleanly. The exec loop also breaks gracefully on
+   recv errors once any data has been captured.
 
-   So either:
-   - **axtls's SHA256 produces a wrong digest** from deep stack /
-     for the larger-than-smoke input (1362 bytes, 21+ blocks).
-     SHA256_CTX is `uint32_t state[8]` so the compll codegen isn't
-     in play, but there could be another uc386 codegen bug
-     specific to axtls's SHA256 round macros / Sigma rotations.
-   - **One of the per-field byte streams diverges** from paramiko's
-     despite matching sizes + first byte.  The most likely suspect
-     is the K mpint encoding (our bn vs paramiko's deflate_long)
-     even though byte-counts agree.
+## Diagnostics surviving in the source
 
-   Concrete next steps:
-   - Add a static accumulator in `_libssh2_axtls_hash_update` that
-     captures the full SHA256 input bytes, then dumps the SHA256
-     of those bytes computed *off-path* (e.g. via a second axtls
-     SHA256 instance after final).  Compare against paramiko's
-     log.  If digests differ for the same input → SHA256 bug.
-   - Or dump 16 bytes from the middle of each per-field update so
-     we can match byte-for-byte against paramiko's `hash_input`.
+Light, always-on print markers stayed in:
 
-   Diagnostic infrastructure already in tree (commit `4db8776`):
-   - `[K:NNNN]` in gen_k, `[H:NNNN]` in ed25519_verify
-   - `[hu:LLLL:BB]` per sha256 update (length + first byte)
-   - `ssh_server.py` monkey-patches paramiko to log `K[0:8]`,
-     `H[0:8]`, and `hash_input_len` / first48 / last16.
+- `port/modssh_uc386dos.c` — `[s:0]..[s:Z]` in `Session.__init__`.
+- `port/libssh2_axtls.c` — `[cv:nE]/nM/kE/kM/kB`, `[ed:nP]/nPok/vE`,
+  `[K:NNN]`, `[H:NNN]`, `[hu:LLLL:BB]` (per-update size + first
+  byte for the exchange-hash SHA256).
+- `rigs/ssh-rig/ssh_server.py` — paramiko monkey patches that log
+  raw recv bytes, decoded packet types, and exception types.
 
-   TweetNaCl uc386 patches all formalized in
-   `scripts/fetch.sh:patch_tweetnacl_uc386dos` —
-   `pack25519` / `M` / `car25519` / `sel25519` / `unpack25519` /
-   `modL` / SHA512 (crypto_hashblocks) compound i64/u64 assigns
-   on array elements all rewritten as plain stores; six functions
-   hoisted to file-static for stack-frame reduction.
+Heavier debug output (full-byte chunk dumps, AES IV/keystream,
+lwip send markers, channel_read result markers) was removed after
+the test passed.
 
-   Operational notes:
-   - Rig at `rigs/ssh-rig/run-ssh-rig.sh` — paramiko Ed25519 host
-     key + password auth (testuser / testpass).
-   - To resume: `freedos-micropython --workdir /private/tmp/fdmp-build
-     port` (the build tree gets wiped on tmp clean; everything is
-     re-fetched cleanly via `scripts/fetch.sh`).
-   - **Do not put back `-DPKTDRV_FORCE_CRYNWR=1`** in
-     `scripts/build_port.sh` for the SSH path — Crynwr + the rmstub
-     bounce-buffer drop the 920-byte server-banner+KEXINIT packet.
-     PM-native NE2000 (FORCE_CRYNWR=0) is what makes the KEX wire
-     path go through.
+## Things to fix next
 
-2. **Restore TLS rig** — previously regressed (see "What's broken"
-   above).  May or may not share root cause with the SSH
-   hash-verify gap.  Try with PM-native NE2000 (drop FORCE_CRYNWR
-   from build_port.sh — already done as of `be1985e`) and check
-   if the TLS rig too completes further; the rmstub drop bug at
-   the rmstub level was the dominant blocker.
+1. **Retire redundant downstream workarounds in `fetch.sh`** —
+   the uc386 codegen fix should let us remove
+   `patch_tweetnacl_uc386dos`'s `(b)` and `(c)` compound-assign
+   rewrites and the `modL` / SHA512 sed patches. Test by reverting
+   each, rebuilding, and re-running both SSHTEST and the smoke
+   test.
 
-3. **Real RSA/DH/key-parse implementations** in
-   `port/libssh2_axtls.c`. Lines ~440–620; bn_* and curve25519_gen_k
-   are now real (commit `be1985e`), RSA/DH still stubs:
-   - `_libssh2_axtls_rsa_new` — wrap raw n/e/d into `RSA_CTX` via
-     `RSA_pub_key_new` / `RSA_priv_key_new`.
-   - `_libssh2_axtls_rsa_sha{1,2}_sign` — `RSA_encrypt` with priv key
-     + PKCS#1 v1.5 padding.
-   - `_libssh2_axtls_rsa_sha{1,2}_verify` — call axtls's `RSA_decrypt`
-     with `is_decryption=0` + DER prefix match (SHA1/256/384/512).
-   - `_libssh2_axtls_pub_priv_keyfile{,memory}` — PEM parser; axtls's
-     `loader.c` already does PKCS#1 / PKCS#8.
-   - `_libssh2_axtls_dh_*` — wrap axtls's bigint API for
-     diffie-hellman-group* KEX fallback when curve25519 isn't
-     negotiated.  Optional — modssh restricts KEX to curve25519
-     so this is only needed for interop with old SSH servers.
+2. **Restore the TLS rig** — `rigs/tls-rig/run-tls-rig.sh` regressed
+   earlier. Re-test on top of the uc386 fix; the same multi-block
+   SHA bug was almost certainly biting the TLS handshake too.
 
-4. **Expand `_ssh` MP API** with SFTP wrapper in
-   `port/modssh_uc386dos.c`.  Session / userauth_password / exec /
-   close already landed (commit `be1985e`); SFTP not yet:
-   - `session.sftp()` → SFTP object
-   - `sftp.open(path, mode)`, `sftp.read/write/close`
+3. **Real RSA / DH / key-parse implementations** in
+   `port/libssh2_axtls.c`. Currently stubs returning `-1`. Needed
+   for non-ed25519 server keys and DH-group KEX fallback.
 
-5. **Python wrappers** at `examples/{sftp,scp}.py` — paramiko-shaped
-   interface on top of `_ssh`. Same shape as `examples/wget.py`.
-   Model: copy `run-wget-rig.sh`, swap the tls_server.py for sshd
-   (via openssh's `/usr/sbin/sshd -p PORT -h KEYFILE -D`). Test
-   uploads + downloads round-trip a known marker.
+4. **SFTP/SCP** — `examples/sftp.py`, `examples/scp.py`, plus an
+   `session.sftp()` API in `port/modssh_uc386dos.c`. The exec
+   path proves channel I/O works; SFTP is structurally similar.
 
-## Commits this session (oldest → newest)
+5. **Replace the `0x40` magic number in SSHTEST.PY's
+   `setsockopt(IPPROTO_TCP, 0x40, 1)`.** `modlwip.c` aliases
+   `TCP_NODELAY` to lwIP's `TF_NODELAY = 0x40`, but POSIX
+   `TCP_NODELAY = 1`. modlwip should either expose `TCP_NODELAY`
+   as a module constant or translate POSIX 1 → TF_NODELAY
+   internally. Upstream MicroPython fix.
 
-**freedos_micro_python** (`git log --oneline 681ddb8..HEAD`):
-```
-6c08104 fetch: pull libssh2 + TweetNaCl for the SSH/SCP work
-2e00008 libssh2: skeleton crypto backend on axtls + TweetNaCl
-01b133c fetch: patch libssh2 callback-macro continuation lines for uc386
-4cac5c4 libssh2 axtls: opaque ctx storage to dodge `comp` typedef collision
-2c6c6e5 fetch: extend callback-macro join patch to libssh2 src/ files
-9fa7b4f build: skip chacha/blowfish files + patch BSD u_int/u_char typedefs
-c13eb92 fetch: extend BSD-types patch to libssh2 poly1305.h
-2d0894d fetch: BSD-types patch also covers crypt.c
-acc52ab build: define HAVE_SELECT + HAVE_SYS_SELECT_H for libssh2
-70934fd build: define HAVE_SYS_UIO_H so libssh2 picks up iovec typedef
-0e4d66b libssh2 axtls: add LIBSSH2_DH_MAX_MODULUS_BITS define
-2c44bd6 libssh2 axtls: add LIBSSH2_DH_GEX_{MIN,OPT,MAX}GROUP constants
-256f60b fetch: hoist libssh2 sftp.h handle_type anonymous enum to file scope
-421980f fetch: add libssh2_axtls to libssh2.h crypto_engine_t enum
-ebce5c7 libssh2 axtls: declare cipher IDs for chacha20/arcfour/cast/aes-gcm
-0d04980 build_port: tighten comment on libssh2 source list
-bc04ae2 fetch: use 32-bit golden-ratio for send_client_hello counter
-cc2158d _ssh module: skeleton MP wrapper around libssh2
-7ab2359 test_smoke: pin _ssh module + libssh2 version + axtls backend
-```
-
-**uc386** (`git log --oneline 1c35184..HEAD`):
-```
-1a12a39 codegen: scope-aware stack reuse for block-scope locals
-7ec4eed libc: add sys/select.h shim — fd_set, FD_*, select() prototype
-c798478 libc: add sys/uio.h shim — struct iovec + readv/writev prototypes
-73b99df codegen: _compound_assign_ll reuses existing __compll_* slots
-```
-
-## Build commands
+## Run
 
 ```sh
-# Fetch + rebuild MP.EXE
-cd /private/tmp/fdmp-build  # or wherever the build tree lives
-PYTHON=/Users/wohl/src/uc386/.venv/bin/python \
-UC386_LIB_INCLUDE=/Users/wohl/src/uc386/src/uc386/lib/include \
-  ~/src/freedos_micro_python/src/freedos_micro_python/scripts/fetch.sh
-PYTHON=/Users/wohl/src/uc386/.venv/bin/python \
-UC386_LIB_INCLUDE=/Users/wohl/src/uc386/src/uc386/lib/include \
-  ~/src/freedos_micro_python/src/freedos_micro_python/scripts/build_port.sh
-# ~25 min; produces build/micropython.bin
+cd ~/src/freedos_micro_python/rigs/ssh-rig
+./run-ssh-rig.sh
+# expect: rig rc=0, SSHTEST: PASS at the end of qemu-ssh.log
+```
 
-# Link MP.EXE
+## Rebuild
+
+```sh
+cd /private/tmp/fdmp-build
+~/src/uc386/.venv/bin/freedos-micropython port
+# ~25–30 min; produces build/micropython.bin
+
 cd ~/src/uc386
 .venv/bin/python -m addons.harness.exe \
   /private/tmp/fdmp-build/build/micropython.asm \
   -o ~/src/freedos_micro_python/rigs/dosbox-x-rig/MP.EXE
-
-# Smoke test under dos_emu (fast, no qemu)
-cd ~/src/freedos_micro_python
-FREEDOS_MP_BIN=/private/tmp/fdmp-build/build/micropython.bin \
-  ~/src/uc386/.venv/bin/python -m pytest \
-  tests/test_smoke.py::test_micropython_import_ssh -v
-
-# qemu+FreeDOS TLS rig (currently REGRESSED — hangs)
-cd ~/src/freedos_micro_python/rigs/tls-rig
-./run-tls-rig.sh
 ```
