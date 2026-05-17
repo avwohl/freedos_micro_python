@@ -1,0 +1,4 @@
+# Built artifacts. Reproducible via ./fetch-freedos.sh.
+freedos-sources-*.tar.gz
+*.exe
+*.bin
