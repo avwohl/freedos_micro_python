@@ -164,6 +164,30 @@ int _libssh2_axtls_hash_init(libssh2_axtls_hash_ctx *ctx, int algo) {
 
 int _libssh2_axtls_hash_update(libssh2_axtls_hash_ctx *ctx,
                                 const void *data, size_t len) {
+    /* Dump per-update size + first byte for hash-input bisection
+     * against paramiko's hm.asbytes(). Only enable for the
+     * exchange-hash SHA256 (algo=SHA256) to avoid noise from
+     * other hashes. */
+    if (ctx->algo == LIBSSH2_AXTLS_HASH_SHA256) {
+        extern int write(int fd, const void *buf, unsigned int n);
+        static const char _hx[] = "0123456789abcdef";
+        char _b[16] = "[hu:";
+        unsigned int l = (unsigned int)len;
+        _b[4]  = _hx[(l >> 12) & 0xF];
+        _b[5]  = _hx[(l >> 8) & 0xF];
+        _b[6]  = _hx[(l >> 4) & 0xF];
+        _b[7]  = _hx[l & 0xF];
+        _b[8]  = ':';
+        if (len > 0) {
+            const uint8_t *dd = (const uint8_t *)data;
+            _b[9]  = _hx[(dd[0] >> 4) & 0xF];
+            _b[10] = _hx[dd[0] & 0xF];
+        } else {
+            _b[9] = '-'; _b[10] = '-';
+        }
+        _b[11] = ']';
+        write(1, _b, 12);
+    }
     const uint8_t *d = (const uint8_t *)data;
     switch (ctx->algo) {
         case LIBSSH2_AXTLS_HASH_SHA1:
@@ -457,6 +481,17 @@ int _libssh2_axtls_ed25519_verify(libssh2_ed25519_ctx *ctx,
                                     const unsigned char *m, size_t m_len) {
     extern int write(int fd, const void *buf, unsigned int n);
     write(1, "[ed:vE]", 7);
+    /* Dump first 8 bytes of m (exchange hash H) for client/server
+     * compare. */
+    static const char _hx[] = "0123456789abcdef";
+    char _hb[24] = "[H:";
+    int _i;
+    for (_i = 0; _i < 8 && _i < (int)m_len; _i++) {
+        _hb[3 + 2*_i]     = _hx[(m[_i] >> 4) & 0xF];
+        _hb[3 + 2*_i + 1] = _hx[m[_i] & 0xF];
+    }
+    _hb[19] = ']';
+    write(1, _hb, 20);
     /* TweetNaCl's crypto_sign_open expects a signed message
        (sig || message). Concatenate, then verify. */
     if (sig_len != 64) return -1;

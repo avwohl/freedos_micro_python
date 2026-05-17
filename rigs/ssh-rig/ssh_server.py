@@ -30,6 +30,37 @@ def _patched_exchange(self, peer_key):
     return secret
 _kc25.KexCurve25519._perform_exchange = _patched_exchange
 
+# Also intercept the exchange hash H by monkey-patching the
+# transport's _set_K_H call (paramiko stores K + H there).
+import paramiko.transport as _pt
+_orig_set_K_H = _pt.Transport._set_K_H
+def _patched_set_K_H(self, K, H):
+    print(f"[ssh-server] H[0:8]={H[:8].hex()}", flush=True)
+    return _orig_set_K_H(self, K, H)
+_pt.Transport._set_K_H = _patched_set_K_H
+
+# Dump the FULL bytes paramiko hashes (hm.asbytes()) for the
+# exchange hash by intercepting hash_algo on the curve25519 kex.
+import hashlib
+_orig_h = _kc25.KexCurve25519
+_orig_parse_init = _orig_h._parse_kexecdh_init
+def _dump_parse_init(self, m):
+    # Wrap the hash algo so we capture the input bytes.
+    orig_algo = self.hash_algo
+    def _wrap(data=b""):
+        h = orig_algo(data)
+        print(f"[ssh-server] hash_input_len={len(data)} "
+              f"first48={data[:48].hex()} "
+              f"last16={data[-16:].hex()}",
+              flush=True)
+        return h
+    self.hash_algo = _wrap
+    try:
+        return _orig_parse_init(self, m)
+    finally:
+        self.hash_algo = orig_algo
+_orig_h._parse_kexecdh_init = _dump_parse_init
+
 
 HERE = Path(__file__).resolve().parent
 
