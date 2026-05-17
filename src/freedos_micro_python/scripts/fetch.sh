@@ -496,31 +496,29 @@ patch_libssh2_crypto_engine_enum() {
 # the ED25519 path sees it. The macro itself doesn't depend on
 # ECDSA — it's just a generic hash-and-verify block that both
 # ECDSA and Ed25519 use.
-# TweetNaCl's curve25519 / ed25519 path has two uc386-dos issues:
+# TweetNaCl's curve25519 / ed25519 path needs one uc386-dos
+# adaptation: hoist the largest stack-allocated arrays to
+# file-static. crypto_scalarmult / crypto_sign_open / add /
+# scalarbase / unpackneg / pack have frame sizes that push past
+# PMODE/W's INT 21h deep-stack threshold; making the locals
+# static is safe in this single-threaded port (no re-entrancy).
 #
-#   (a) Large stack frames in crypto_scalarmult / crypto_sign_open
-#       / add / scalarbase / unpackneg / pack push past PMODE/W's
-#       INT 21h deep-stack threshold. Hoist the i64 / gf locals
-#       to file-static (single-threaded port; no re-entrancy).
-#
-#   (b) uc386's `_compound_assign_ll reuses existing __compll_*`
-#       codegen (commit 73b99df) allocates a hidden snapshot slot
-#       for the LHS of `&=` / `+=` / etc. on i64.  In pack25519's
-#       FOR(j,2) loop the snapshot slot happens to alias the `j`
-#       counter under certain caller stack shapes — symptom is an
-#       infinite loop (observed: 51,350 iterations from
-#       crypto_sign_open's pack→pack25519 call chain).  Rewrite
-#       the `m[i-1] &= 0xffff` / `m[14] &= 0xffff` compound assigns
-#       as plain `m[i-1] = m[i-1] & 0xffff` stores to bypass the
-#       synthetic slot.
+# Historical note: this patch used to also rewrite a long list of
+# i64 compound assigns (`m[i-1] &= 0xffff`, `t[i+j] += …`, etc.)
+# as plain stores to work around a uc386 codegen bug where the
+# `__compll_addr/snap_*` slots emitted by `_compound_assign_ll`
+# aliased a user loop variable. uc386 commit `10b4dfd` fixed the
+# root cause (alloc_local now advances frame_size on decl
+# re-bind), so the compound-assign rewrites have been dropped.
+# The file-static hoists below are kept because they are about
+# PMODE/W stack depth, not the compll bug.
 patch_tweetnacl_uc386dos() {
     F="upstream/lib/tweetnacl/tweetnacl.c"
     [ -f "$F" ] || return 0
     if grep -q "uc386-dos: locals moved to file-static" "$F"; then
         return 0
     fi
-    echo "micropython: patching tweetnacl for uc386-dos stack frames + compll codegen …"
-    # (a) Stack-frame reductions — file-static the i64 / gf locals.
+    echo "micropython: patching tweetnacl for uc386-dos PMODE/W stack frames …"
     perl -0777 -i -pe '
         # crypto_scalarmult: hoist u8 z[32], i64 x[80], gf a..f to static.
         s{(int crypto_scalarmult\(u8 \*q,const u8 \*n,const u8 \*p\)\n\{\n)  u8 z\[32\];\n  i64 x\[80\],r,i;\n  gf a,b,c,d,e,f;\n}
@@ -549,60 +547,7 @@ patch_tweetnacl_uc386dos() {
         # reduce (ed25519): hoist i64 x[64] (512 bytes) to static.
         s{(sv reduce\(u8 \*r\)\n\{\n)  i64 x\[64\],i;\n}
          {$1  /* uc386-dos: locals moved to file-static */\n  static i64 x[64];\n  i64 i;\n}s;
-
-        # (b) pack25519 compound-assign workaround. The j counter
-        # was getting clobbered by the synthetic __compll snapshot
-        # slot for `m[i-1] &= 0xffff` / `m[14] &= 0xffff` under the
-        # sign_open call stack — rewrite as plain stores.
-        s{(    for\(i=1;i<15;i\+\+\) \{\n      m\[i\]=t\[i\]-0xffff-\(\(m\[i-1\]>>16\)&1\);\n)      m\[i-1\]&=0xffff;\n}
-         {$1      m[i-1]=m[i-1]&0xffff;  /* uc386-dos: avoid compll __compll snap-slot clobber of j */\n}s;
-        s{    m\[14\]&=0xffff;\n}
-         {    m[14]=m[14]&0xffff;  /* uc386-dos: see fetch.sh */\n}s;
-
-        # (c) Same compound-assign workaround for M and car25519.
-        # The Ms compound + on t[i+j] produced wrong K when peer-key
-        # input was a real X25519 pubkey (works for p=_9 because most
-        # b[j] are zero → most multiplies are a[i]*0 → different
-        # codegen path). Plain stores bypass the synthetic
-        # __compll_snap slot.
-        s{(sv M\(gf o,const gf a,const gf b\)\n\{\n  i64 i,j,t\[31\];\n  FOR\(i,31\) t\[i\]=0;\n)  FOR\(i,16\) FOR\(j,16\) t\[i\+j\]\+=a\[i\]\*b\[j\];\n  FOR\(i,15\) t\[i\]\+=38\*t\[i\+16\];\n}
-         {$1  /* uc386-dos: plain stores, see fetch.sh */\n  FOR(i,16) FOR(j,16) t[i+j] = t[i+j] + a[i]*b[j];\n  FOR(i,15) t[i] = t[i] + 38*t[i+16];\n}s;
-
-        # car25519 has three compound ops on the o[] array.
-        s{(sv car25519\(gf o\)\n\{\n  int i;\n  i64 c;\n  FOR\(i,16\) \{\n)    o\[i\]\+=\(1LL<<16\);\n    c=o\[i\]>>16;\n    o\[\(i\+1\)\*\(i<15\)\]\+=c-1\+37\*\(c-1\)\*\(i==15\);\n    o\[i\]-=c<<16;\n}
-         {$1    /* uc386-dos: plain stores, see fetch.sh */\n    o[i] = o[i] + (1LL<<16);\n    c=o[i]>>16;\n    o[(i+1)*(i<15)] = o[(i+1)*(i<15)] + (c-1+37*(c-1)*(i==15));\n    o[i] = o[i] - (c<<16);\n}s;
-
-        # sel25519 compound XOR on i64 array elements.
-        s{(    t= c&\(p\[i\]\^q\[i\]\);\n)    p\[i\]\^=t;\n    q\[i\]\^=t;\n}
-         {$1    /* uc386-dos: plain stores, see fetch.sh */\n    p[i] = p[i] ^ t;\n    q[i] = q[i] ^ t;\n}s;
-
-        # unpack25519 compound AND on o[15] (i64).
-        s{  o\[15\]&=0x7fff;\n}
-         {  o[15] = o[15] & 0x7fff;  /* uc386-dos: plain store, see fetch.sh */\n}s;
-
     ' "$F"
-
-    # modL (ed25519 reduce-mod-L) has six i64 compound ops on x[].
-    # Use line-oriented sed since the pattern is unique and short.
-    # Also: crypto_hashblocks (SHA512) has u64 compound `+=` on
-    # b[]/w[]/a[]/z[] array elements that hit the same codegen.
-    # Patching these is what makes the Ed25519 verify path actually
-    # compute the right SHA512 hash — without it, the exchange
-    # hash differs from what the server signed, and KEX_FAILURE
-    # is the symptom.
-    sed -i.bak \
-        -e 's|^      x\[j\] += carry - 16 \* x\[i\] \* L\[j - (i - 32)\];|      x[j] = x[j] + (carry - 16 * x[i] * L[j - (i - 32)]);  /* uc386-dos */|' \
-        -e 's|^      x\[j\] -= carry << 8;|      x[j] = x[j] - (carry << 8);  /* uc386-dos */|' \
-        -e 's|^    x\[j\] += carry;$|    x[j] = x[j] + carry;  /* uc386-dos */|' \
-        -e 's|^    x\[j\] += carry - (x\[31\] >> 4) \* L\[j\];|    x[j] = x[j] + (carry - (x[31] >> 4) * L[j]);  /* uc386-dos */|' \
-        -e 's|^    x\[j\] &= 255;|    x[j] = x[j] \& 255;  /* uc386-dos */|' \
-        -e 's|^  FOR(j,32) x\[j\] -= carry \* L\[j\];|  FOR(j,32) x[j] = x[j] - (carry * L[j]);  /* uc386-dos */|' \
-        -e 's|^    x\[i+1\] += x\[i\] >> 8;|    x[i+1] = x[i+1] + (x[i] >> 8);  /* uc386-dos */|' \
-        -e 's|^      b\[3\] += t;|      b[3] = b[3] + t;  /* uc386-dos */|' \
-        -e 's|^.*w\[j\] += w\[(j+9)%16\] + sigma0(w\[(j+1)%16\]) + sigma1(w\[(j+14)%16\]);|	  w[j] = w[j] + (w[(j+9)%16] + sigma0(w[(j+1)%16]) + sigma1(w[(j+14)%16]));  /* uc386-dos */|' \
-        -e 's|^    FOR(i,8) { a\[i\] += z\[i\]; z\[i\] = a\[i\]; }|    FOR(i,8) { a[i] = a[i] + z[i]; z[i] = a[i]; }  /* uc386-dos */|' \
-        "$F"
-    rm -f "$F.bak"
 }
 
 patch_libssh2_kex_ecsha_macro_hoist() {
