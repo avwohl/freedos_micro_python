@@ -85,43 +85,46 @@ committed; nothing in the working tree.
 
 In rough order of effort/value:
 
-1. **Fix tweetnacl `crypto_scalarmult` arithmetic bug** —
-   2026-05-16 session got SSH all the way to ed25519 verify
-   running end-to-end (commits `be1985e` → `168d6ed`). The
-   remaining gap: client and server compute *different* shared
-   secret K values:
+1. **Find why client H (exchange hash) differs from server H** —
+   The 2026-05-16 session traced the SSH stack all the way through
+   K agreement (commits `13c75be`, `4db8776`).  K matches across
+   client/server every run.  H differs.  Per-update sha256 byte
+   counts match paramiko's `hm.asbytes()` field layout exactly
+   (16 calls total, 1362 hash bytes — same as paramiko); first
+   byte of each field matches the expected SSH-record shape.
 
-       Client K[0:8] = 585dc06000000000
-       Server K[0:8] = fc886b78b052c0c6
-
-   Bytes 4–7 of our K being all-zero is the tell. `crypto_scalarmult`
-   works when `p` is `_9` (the base point — used by
-   `crypto_scalarmult_base` for our public key, which the server
-   accepts) but produces a wrong result when `p` is a real X25519
-   public key from the server. Most likely a uc386 codegen bug
-   in `M()` or `car25519()` that only manifests when both
-   multiply operands are non-zero (when `p`=`_9`, `b[1..15]=0` so
-   most inner-loop multiplications reduce to `a[i]*0`).
+   So either:
+   - **axtls's SHA256 produces a wrong digest** from deep stack /
+     for the larger-than-smoke input (1362 bytes, 21+ blocks).
+     SHA256_CTX is `uint32_t state[8]` so the compll codegen isn't
+     in play, but there could be another uc386 codegen bug
+     specific to axtls's SHA256 round macros / Sigma rotations.
+   - **One of the per-field byte streams diverges** from paramiko's
+     despite matching sizes + first byte.  The most likely suspect
+     is the K mpint encoding (our bn vs paramiko's deflate_long)
+     even though byte-counts agree.
 
    Concrete next steps:
-   - Write a stand-alone X25519 test vector check (RFC 7748:
-     priv `a546...`, pub `e6db...` should give out `c3da...`).
-     If the test fails on uc386, isolate the smallest input that
-     causes divergence.
-   - Instrument `M()` to dump intermediate `t[i]` values.
-   - Try rewriting compound assigns inside `M()` / `car25519()`
-     as plain stores (same workaround as the `pack25519` fix in
-     `patch_tweetnacl_uc386dos`).
+   - Add a static accumulator in `_libssh2_axtls_hash_update` that
+     captures the full SHA256 input bytes, then dumps the SHA256
+     of those bytes computed *off-path* (e.g. via a second axtls
+     SHA256 instance after final).  Compare against paramiko's
+     log.  If digests differ for the same input → SHA256 bug.
+   - Or dump 16 bytes from the middle of each per-field update so
+     we can match byte-for-byte against paramiko's `hash_input`.
 
-   Diagnostic infrastructure already in tree:
-   - `[K:NNNN]` marker in `_libssh2_axtls_curve25519_gen_k` dumps
-     first 8 bytes of K.
-   - `ssh_server.py` monkey-patches paramiko's
-     `KexCurve25519._perform_exchange` to log the same bytes.
+   Diagnostic infrastructure already in tree (commit `4db8776`):
+   - `[K:NNNN]` in gen_k, `[H:NNNN]` in ed25519_verify
+   - `[hu:LLLL:BB]` per sha256 update (length + first byte)
+   - `ssh_server.py` monkey-patches paramiko to log `K[0:8]`,
+     `H[0:8]`, and `hash_input_len` / first48 / last16.
 
-   Stack-frame and `pack25519` codegen issues are fixed
-   (commit `0f51af1`, formalized in
-   `scripts/fetch.sh:patch_tweetnacl_uc386dos`).
+   TweetNaCl uc386 patches all formalized in
+   `scripts/fetch.sh:patch_tweetnacl_uc386dos` —
+   `pack25519` / `M` / `car25519` / `sel25519` / `unpack25519` /
+   `modL` / SHA512 (crypto_hashblocks) compound i64/u64 assigns
+   on array elements all rewritten as plain stores; six functions
+   hoisted to file-static for stack-frame reduction.
 
    Operational notes:
    - Rig at `rigs/ssh-rig/run-ssh-rig.sh` — paramiko Ed25519 host
