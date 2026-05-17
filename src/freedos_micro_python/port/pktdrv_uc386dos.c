@@ -189,8 +189,19 @@ static int ne2k_init_direct(unsigned char mac[6]) {
     }
     write(1, "[ne2k:reset-ok]", 15);
 
+    // Probe for a real NIC before doing destructive writes or DMA.
+    // Real NE2000: write CR=0x21 (STP=1, RD2=1, PS=0), read back ==
+    // 0x21. dos_emu / Unicorn / a slot with no NIC: I/O reads return
+    // 0xFF (or fault on `rep insw` later). Bail before the DMA so
+    // the caller falls through to the Crynwr packet-driver path.
+    ne2k_outb(NE2K_BASE + NE_CR, 0x21);
+    unsigned int cr_readback = ne2k_inb(NE2K_BASE + NE_CR);
+    if (cr_readback != 0x21) {
+        write(1, "[ne2k:no-nic]", 13);
+        return -1;
+    }
+
     // Stop NIC, page 0
-    ne2k_outb(NE2K_BASE + NE_CR, 0x21);    // STP=1, RD2=1, PS=0
     ne2k_outb(NE2K_BASE + NE_DCR, 0x49);   // word transfers, FIFO 8, normal
     ne2k_outb(NE2K_BASE + NE_RBCR0, 0);
     ne2k_outb(NE2K_BASE + NE_RBCR1, 0);
