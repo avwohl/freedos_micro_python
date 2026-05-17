@@ -80,28 +80,36 @@ Heavier debug output (full-byte chunk dumps, AES IV/keystream,
 lwip send markers, channel_read result markers) was removed after
 the test passed.
 
+## Things done since the SSH-working snapshot
+
+  - **Retired the tweetnacl compound-assign workarounds in
+    `fetch.sh`** (commit `e49134a`). uc386 commit `10b4dfd` made
+    them dead weight. Patch shrank from 7 file-static hoists + 12
+    rewrites + 10 modL/SHA512 sed substitutions down to just the
+    7 hoists. SSHTEST still PASS; 102/103 smoke tests pass.
+  - **NE2K-probe early-out in `pktdrv_uc386dos.c`** (commit
+    `bd4e4cc`). The PM-native NE2K path that landed in `be1985e`
+    crashed in dos_emu's NetworkSimulator (no NE2K I/O port
+    emulation) on `rep insw`. The probe writes CR=0x21, reads
+    back; on mismatch (0xFF), returns -1 so pktdrv_init falls
+    through to the Crynwr path the netsim does emulate. Restores
+    3 lwip smoke tests (DHCP, DHCP int83 fallback, DNS query).
+  - **TLS rig also works again** without any TLS-specific change:
+    `rigs/tls-rig/run-tls-rig.sh` now exits rc=0 with
+    `TLSTEST: PASS`, `data_len 25`. The same uc386 + multi-block
+    SHA / AES fixes that unblocked SSH were the underlying issue.
+
 ## Things to fix next
 
-1. **Retire redundant downstream workarounds in `fetch.sh`** —
-   the uc386 codegen fix should let us remove
-   `patch_tweetnacl_uc386dos`'s `(b)` and `(c)` compound-assign
-   rewrites and the `modL` / SHA512 sed patches. Test by reverting
-   each, rebuilding, and re-running both SSHTEST and the smoke
-   test.
-
-2. **Restore the TLS rig** — `rigs/tls-rig/run-tls-rig.sh` regressed
-   earlier. Re-test on top of the uc386 fix; the same multi-block
-   SHA bug was almost certainly biting the TLS handshake too.
-
-3. **Real RSA / DH / key-parse implementations** in
+1. **Real RSA / DH / key-parse implementations** in
    `port/libssh2_axtls.c`. Currently stubs returning `-1`. Needed
    for non-ed25519 server keys and DH-group KEX fallback.
 
-4. **SFTP/SCP** — `examples/sftp.py`, `examples/scp.py`, plus an
+2. **SFTP/SCP** — `examples/sftp.py`, `examples/scp.py`, plus an
    `session.sftp()` API in `port/modssh_uc386dos.c`. The exec
    path proves channel I/O works; SFTP is structurally similar.
 
-5. **Replace the `0x40` magic number in SSHTEST.PY's
+3. **Replace the `0x40` magic number in SSHTEST.PY's
    `setsockopt(IPPROTO_TCP, 0x40, 1)`.** `modlwip.c` aliases
    `TCP_NODELAY` to lwIP's `TF_NODELAY = 0x40`, but POSIX
    `TCP_NODELAY = 1`. modlwip should either expose `TCP_NODELAY`
