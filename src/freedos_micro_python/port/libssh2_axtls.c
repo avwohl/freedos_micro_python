@@ -19,6 +19,7 @@
    field of the same name. */
 #include "crypto_misc.h"      /* axtls hashes + bigint + RSA decls */
 #include "ssl.h"              /* axtls SSL_CTX, RSA_CTX */
+#include <arpa/inet.h>        /* ntohl/htonl for AES-CTR byteswap */
 
 /* Helpers: re-interpret the opaque storage as the real axtls type. */
 #define _AS_SHA1(c)   ((SHA1_CTX *)((c)->storage))
@@ -332,11 +333,14 @@ int _libssh2_axtls_cipher_init(_libssh2_cipher_ctx *ctx, int algo,
         default: return -1;
     }
     AES_set_key(_AS_AES(ctx), secret, iv, mode);
-    if (!encrypt) {
-        AES_convert_key(_AS_AES(ctx));
-    }
     ctx->keylen_bits = (mode == AES_MODE_128) ? 128 : 256;
     ctx->is_ctr = (algo >= _libssh2_cipher_aes128ctr && algo <= _libssh2_cipher_aes256ctr);
+    /* CTR mode encrypts the counter in BOTH directions — never call
+     * AES_convert_key, even for the receive direction. CBC decrypt
+     * is the only case that needs the inverse key schedule. */
+    if (!encrypt && !ctx->is_ctr) {
+        AES_convert_key(_AS_AES(ctx));
+    }
     if (ctx->is_ctr) {
         memcpy(ctx->ctr_iv, iv, 16);
     }
@@ -348,13 +352,30 @@ int _libssh2_axtls_cipher_crypt(_libssh2_cipher_ctx *ctx, int algo,
                                  size_t blocklen) {
     if (ctx->is_ctr) {
         /* AES-CTR: for each 16-byte block, AES-ECB-encrypt the
-           counter and XOR with the plaintext/ciphertext. */
+           counter and XOR with the plaintext/ciphertext.
+         *
+         * axtls's AES_encrypt() expects `uint32_t *data` interpreted
+         * as four BIG-ENDIAN words (it shifts/masks bytes via
+         * (w >> 24) & 0xFF, etc.). On little-endian hosts we must
+         * byteswap into network order before AES, then back out
+         * for the XOR. axtls's own AES_cbc_encrypt does this with
+         * ntohl/htonl; we mirror that here.
+         */
         size_t i;
         for (i = 0; i < blocklen; i += 16) {
+            uint32_t kw[4];
+            memcpy(kw, ctx->ctr_iv, 16);
+            kw[0] = (uint32_t)ntohl(kw[0]);
+            kw[1] = (uint32_t)ntohl(kw[1]);
+            kw[2] = (uint32_t)ntohl(kw[2]);
+            kw[3] = (uint32_t)ntohl(kw[3]);
+            AES_encrypt(_AS_AES(ctx), kw);
+            kw[0] = (uint32_t)htonl(kw[0]);
+            kw[1] = (uint32_t)htonl(kw[1]);
+            kw[2] = (uint32_t)htonl(kw[2]);
+            kw[3] = (uint32_t)htonl(kw[3]);
             unsigned char keystream[16];
-            memcpy(keystream, ctx->ctr_iv, 16);
-            /* In-place encrypt the counter into keystream. */
-            AES_encrypt(_AS_AES(ctx), (uint32_t *)keystream);
+            memcpy(keystream, kw, 16);
             size_t j;
             size_t take = (blocklen - i < 16) ? (blocklen - i) : 16;
             for (j = 0; j < take; j++) {

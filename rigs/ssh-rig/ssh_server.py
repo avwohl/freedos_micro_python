@@ -15,6 +15,7 @@ is a separate slice of work.
 """
 
 import argparse
+import logging
 import socket
 import sys
 import threading
@@ -22,6 +23,45 @@ import time
 from pathlib import Path
 
 import paramiko
+
+# Verbose paramiko logging so we can see post-handshake packet flow.
+logging.basicConfig(level=logging.DEBUG, format="[paramiko] %(message)s")
+paramiko.util.log_to_file("/tmp/paramiko-server.log", level="DEBUG")
+
+# Tap raw socket recv to see if encrypted SERVICE_REQUEST actually arrives.
+import paramiko.packet as _ppkt
+_orig_read_all = _ppkt.Packetizer.read_all
+def _tap_read_all(self, n, check_rekey=False):
+    data = _orig_read_all(self, n, check_rekey)
+    print(f"[server-recv] {len(data)}B {data[:32].hex() if data else ''}",
+          flush=True)
+    return data
+_ppkt.Packetizer.read_all = _tap_read_all
+
+_orig_send_message = _ppkt.Packetizer.send_message
+def _tap_send_message(self, data):
+    body = bytes(data.asbytes()) if hasattr(data, "asbytes") else bytes(data)
+    ptype = body[0] if body else -1
+    print(f"[server-send] type={ptype} body={body[:48].hex()}", flush=True)
+    return _orig_send_message(self, data)
+_ppkt.Packetizer.send_message = _tap_send_message
+
+# Tap read_message to dump the decrypted packet so we can compare
+# server's view of our encrypted bytes against the plaintext we
+# expected. Catch the MAC/blocking exceptions too so we can see them.
+_orig_read_message = _ppkt.Packetizer.read_message
+def _tap_read_message(self):
+    try:
+        rc = _orig_read_message(self)
+        ptype, m = rc
+        body = m.get_remainder()
+        m.rewind()
+        print(f"[server-msg] type={ptype} body={body[:48].hex()}", flush=True)
+        return rc
+    except Exception as e:
+        print(f"[server-msg] EXCEPTION {type(e).__name__}: {e}", flush=True)
+        raise
+_ppkt.Packetizer.read_message = _tap_read_message
 import paramiko.kex_curve25519 as _kc25
 _orig_exchange = _kc25.KexCurve25519._perform_exchange
 def _patched_exchange(self, peer_key):
@@ -40,24 +80,38 @@ def _patched_set_K_H(self, K, H):
 _pt.Transport._set_K_H = _patched_set_K_H
 
 # Dump the FULL bytes paramiko hashes (hm.asbytes()) for the
-# exchange hash by intercepting hash_algo on the curve25519 kex.
+# exchange hash, plus per-field hex bytes, by intercepting Message.add
+# during the curve25519 kex parse-init.
 import hashlib
 _orig_h = _kc25.KexCurve25519
 _orig_parse_init = _orig_h._parse_kexecdh_init
 def _dump_parse_init(self, m):
-    # Wrap the hash algo so we capture the input bytes.
+    import paramiko.message as _pmsg
+    from paramiko.util import asbytes
+    _real_add_string = _pmsg.Message.add_string
+    _field_idx = [0]
+    def _wrap_add_string(self2, s):
+        b = asbytes(s)
+        print(f"[ssh-server] field{_field_idx[0]} len={len(b)} "
+              f"sha={hashlib.sha256(b).hexdigest()[:16]} "
+              f"first8={b[:8].hex()} mid8={b[len(b)//2:len(b)//2+8].hex()} "
+              f"last8={b[-8:].hex()}", flush=True)
+        _field_idx[0] += 1
+        return _real_add_string(self2, s)
+    _pmsg.Message.add_string = _wrap_add_string
+    # And wrap hash_algo to dump total len.
     orig_algo = self.hash_algo
     def _wrap(data=b""):
         h = orig_algo(data)
         print(f"[ssh-server] hash_input_len={len(data)} "
-              f"first48={data[:48].hex()} "
-              f"last16={data[-16:].hex()}",
+              f"first48={data[:48].hex()} last16={data[-16:].hex()}",
               flush=True)
         return h
     self.hash_algo = _wrap
     try:
         return _orig_parse_init(self, m)
     finally:
+        _pmsg.Message.add_string = _real_add_string
         self.hash_algo = orig_algo
 _orig_h._parse_kexecdh_init = _dump_parse_init
 

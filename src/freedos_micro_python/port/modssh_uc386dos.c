@@ -19,6 +19,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <errno.h>
 
 #include "py/runtime.h"
 #include "py/stream.h"
@@ -49,34 +50,37 @@ static void _ssh_lazy_init(void) {
 
 static ssize_t _ssh_recv_cb(libssh2_socket_t fd, void *buf, size_t len,
                             int flags, void **abstract) {
-    extern int write(int wfd, const void *wbuf, unsigned int n);
-    write(1, "[r]", 3);
     (void)fd;
     (void)flags;
     mp_obj_t sock = (mp_obj_t)(*abstract);
     if (sock == MP_OBJ_NULL) {
-        write(1, "[r!nil]", 7);
         return -1;
     }
     ssize_t n = mp_stream_posix_read((void *)MP_OBJ_TO_PTR(sock), buf, len);
-    if (n < 0) write(1, "[r-]", 4);
+    /* lwip TCP returns 0 on a clean peer-FIN. libssh2's transport
+     * layer treats recv() == 0 as a SOCKET_RECV failure and bails
+     * out — even when it has already parsed channel packets queued
+     * in session->packets. Returning -EAGAIN here makes libssh2 fall
+     * through to the queue-drain branch in _libssh2_channel_read,
+     * which is the right thing when the server has sent
+     * CHANNEL_DATA + EXIT_STATUS + EOF + CLOSE just before its TCP
+     * FIN: the queued packets carry the eof/close state, so the
+     * next channel_read after the drain returns 0 cleanly. */
+    if (n == 0) {
+        return -EAGAIN;
+    }
     return n;
 }
 
 static ssize_t _ssh_send_cb(libssh2_socket_t fd, const void *buf, size_t len,
                             int flags, void **abstract) {
-    extern int write(int wfd, const void *wbuf, unsigned int n);
-    write(1, "[w]", 3);
     (void)fd;
     (void)flags;
     mp_obj_t sock = (mp_obj_t)(*abstract);
     if (sock == MP_OBJ_NULL) {
-        write(1, "[w!nil]", 7);
         return -1;
     }
-    ssize_t n = mp_stream_posix_write((void *)MP_OBJ_TO_PTR(sock), buf, len);
-    if (n < 0) write(1, "[w-]", 4);
-    return n;
+    return mp_stream_posix_write((void *)MP_OBJ_TO_PTR(sock), buf, len);
 }
 
 /* ---------- Session ---------- */
@@ -258,13 +262,26 @@ static mp_obj_t ssh_session_exec(mp_obj_t self_in, mp_obj_t cmd_in) {
             }
             /* No data right now but stream still open — keep polling. */
         } else {
-            /* Negative = error or LIBSSH2_ERROR_EAGAIN. In blocking
-             * mode we shouldn't see EAGAIN. */
+            /* Negative = error or LIBSSH2_ERROR_EAGAIN.
+             * After server-side `echo ...; exit` the server sends
+             * CHANNEL_DATA + EXIT_STATUS + EOF + CLOSE and then
+             * shuts down its TCP write side. Our next recv() sees
+             * EOF; libssh2 reports LIBSSH2_ERROR_SOCKET_RECV (-43)
+             * or LIBSSH2_ERROR_SOCKET_DISCONNECT (-32). Treat as
+             * end-of-stream once any data has been captured; bail
+             * only if we never got anything. */
+            if (vstr_len(&vstr) > 0 ||
+                libssh2_channel_eof(channel) ||
+                (int)n == LIBSSH2_ERROR_SOCKET_RECV ||
+                (int)n == LIBSSH2_ERROR_SOCKET_DISCONNECT) {
+                break;
+            }
             vstr_clear(&vstr);
             libssh2_channel_free(channel);
             _ssh_raise_session_error(self->session, (int)n, "channel_read");
         }
     }
+    /* Best-effort close; transport may already be torn down. */
     libssh2_channel_close(channel);
     libssh2_channel_free(channel);
     return mp_obj_new_bytes_from_vstr(&vstr);
