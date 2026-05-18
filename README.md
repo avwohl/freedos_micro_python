@@ -73,6 +73,42 @@ pytest tests/
 
 The smoke tests skip cleanly if `build/micropython.bin` doesn't exist.
 
+## Bundled networking utilities
+
+The port ships three pure-MicroPython programs that double as
+regression tests and as usable standalone tools — drop them into a
+DOS image (or run them in the REPL) and they work end-to-end against
+real servers.
+
+- **[`examples/wget.py`](examples/wget.py)** — HTTPS streaming
+  downloader. Built on `socket` (lwIP-backed) and `ssl` (axtls
+  CERT_REQUIRED supported via `--ca-certs`). Streams in 4 KB chunks
+  so the whole body never sits in RAM. Follows up to 5 redirects.
+  ```
+  MP.EXE WGET.PY -O OUT.TXT https://example.com/file
+  ```
+
+- **[`examples/scp.py`](examples/scp.py)** — SCP client wrapping
+  `_ssh.Session.scp_recv()` and `_ssh.Session.scp_send()` (which
+  bind libssh2's `scp_recv2` / `scp_send_ex`). Password auth only
+  for now; up/down inferred from which arg has the `host:/path` colon.
+  ```
+  MP.EXE SCP.PY user@10.0.2.2:/etc/motd MOTD.TXT
+  MP.EXE SCP.PY DATA.BIN user@10.0.2.2:/uploads/data.bin
+  ```
+
+- **[`examples/sftp.py`](examples/sftp.py)** — SFTP client wrapping
+  `_ssh.Session.sftp()` + `SFTP.open()` / `SFTPFile.read|write|close`.
+  ```
+  MP.EXE SFTP.PY get user@10.0.2.2:/etc/hostname HOST.TXT
+  MP.EXE SFTP.PY put REPORT.TXT user@10.0.2.2:/incoming/report.txt
+  ```
+
+All three run inside the SSH rig harness (`rigs/ssh-rig/`,
+`rigs/tls-rig/`) against a paramiko/local-server fixture and confirm
+PASS end-to-end; see [`docs/TESTS.md`](docs/TESTS.md) for the full
+catalog.
+
 ## Layout
 
 - `src/freedos_micro_python/scripts/` — the three shell scripts
@@ -83,9 +119,12 @@ The smoke tests skip cleanly if `build/micropython.bin` doesn't exist.
 - `src/freedos_micro_python/gen_qstrdefs.py` — qstr table generator
   (mirrors upstream's `tools/makeqstrdata.py`)
 - `src/freedos_micro_python/cli.py` — the `freedos-micropython` CLI
+- `examples/` — standalone MicroPython programs (`wget.py`, `scp.py`,
+  `sftp.py`) shipped as both regression tests and usable utilities
 - `tests/` — pytest smoke tests + qstr unit tests
 - `rigs/dosbox-x-rig/` — DOSBox-X regression rig (network packet driver)
 - `rigs/tls-rig/` — axtls TLS regression rig
+- `rigs/ssh-rig/` — paramiko-fixture SSH/SFTP/SCP rig
 
 ## A debt to FreeDOS
 

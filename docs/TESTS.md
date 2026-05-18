@@ -65,7 +65,47 @@ A 58-line standalone program that performs a full SSH-2 session:
   `freedos-micropython` build pipeline end-to-end.
 
   Run: `cd rigs/ssh-rig && ./run-ssh-rig.sh` — expect `rig rc=0`
-  and `SSHTEST: PASS` (`exec_ok len=11`).
+  and `SSHTEST: PASS`. The rig now also exercises SFTP
+  (download + upload) and SCP (download + upload) over the same
+  session, see the SCP/SFTP standalone wrappers below.
+
+### `examples/scp.py` — SCP up/download
+
+A small `scp` client (~120 lines) wrapping
+`_ssh.Session.scp_recv()` / `scp_send()`. Direction is inferred
+from which positional arg has the `host:/path` colon. Today only
+password auth is wired up (public-key auth waits on real
+RSA/DH parsing in `port/libssh2_axtls.c`).
+
+  Run from MP:
+  ```
+  MP.EXE SCP.PY user@10.0.2.2:/etc/motd MOTD.TXT
+  MP.EXE SCP.PY DATA.BIN user@10.0.2.2:/uploads/data.bin
+  ```
+
+  Exercises end-to-end: `_ssh` channel I/O (data + trailing-\0
+  SCP terminator), libssh2's `scp_recv2` / `scp_send_ex`, and
+  the FreeDOS file-write path. The rig at `rigs/ssh-rig/` drives
+  a full down + up round-trip against a paramiko-backed SCP
+  fixture (in-memory, shared with SFTP), so a green `SSHTEST: PASS`
+  covers SCP as well.
+
+### `examples/sftp.py` — SFTP get/put
+
+A small `sftp` client (~110 lines) wrapping `_ssh.Session.sftp()` +
+`SFTP.open(path, mode)` + `SFTPFile.read|write|close`. Subcommands
+`get` / `put` parallel `scp.py`.
+
+  Run from MP:
+  ```
+  MP.EXE SFTP.PY get user@10.0.2.2:/etc/hostname HOST.TXT
+  MP.EXE SFTP.PY put REPORT.TXT user@10.0.2.2:/incoming/report.txt
+  ```
+
+  Exercises end-to-end: SFTP subsystem (channel-level `subsystem`
+  request), the libssh2-axtls crypto adapter, and the same paramiko
+  fixture the SCP path uses. Covered by the same `SSHTEST.PY` rig
+  pass.
 
 ### `rigs/tls-rig/{TLSTEST,WGETTEST,READTEST}.PY` — TLS rigs
 
@@ -79,13 +119,6 @@ isolating netif and filesystem behavior from the TLS layer.
 (The TLS rig is currently regressed — see `docs/WIP.md`. The
 programs are correct; the underlying handshake-state machinery
 broke and is the next thing to chase.)
-
-### SCP / SFTP — planned
-
-Not yet checked in. The `_ssh` module already proves channel I/O
-(exec returns 11 bytes through a real cipher-and-MAC SSH packet),
-so `examples/scp.py` and `examples/sftp.py` are a structural
-extension. Tracked in `docs/WIP.md` under "Things to fix next".
 
 ---
 
