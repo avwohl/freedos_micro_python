@@ -52,6 +52,15 @@ if [ ! -f "$HOST_KEY" ]; then
     echo "[rig] generating Ed25519 host key ..."
     ssh-keygen -t ed25519 -N "" -f "$HOST_KEY" -q
 fi
+# Same idea for a client-identity Ed25519 key the rig copies onto
+# the floppy as CLIENT.KEY; SSHTEST.PY reads it back, hands it to
+# session.userauth_publickey, and the server matches the pubkey
+# against ssh_client_ed25519.pub in check_auth_publickey.
+CLIENT_KEY="$(pwd)/ssh_client_ed25519"
+if [ ! -f "$CLIENT_KEY" ]; then
+    echo "[rig] generating Ed25519 client identity ..."
+    ssh-keygen -t ed25519 -N "" -f "$CLIENT_KEY" -q
+fi
 
 # 2. Build the FAT12 floppy: FreeDOS minimal + MP.EXE + NE2000.COM
 #    + AUTOEXEC.BAT + SSHTEST.PY.
@@ -69,16 +78,34 @@ echo "[rig] building FAT12 image ..."
 cp "$FREEDOS_IMG" "$TEST_IMG"
 mcopy -i "$TEST_IMG" -o "$MP_EXE"      ::MP.EXE
 mcopy -i "$TEST_IMG" -o "$NE2000_COM"  ::NE2000.COM
-# Paste-mode wrap so MP REPL ingests the script in one block,
-# matching the TLS rig's COM1 paste-mode pattern.
+# Inline the ed25519 private key bytes into SSHTEST.PY at the
+# __CLIENT_KEY_BYTES__ placeholder, then use the rendered file for
+# both the paste-mode COM1 stream and the floppy copy. We avoid
+# calling `open('CLIENT.KEY')` from inside the test because — for
+# reasons not yet pinned down — DOS INT 21h AH=3D wedges in the
+# DPMI 0x0301 thunk when invoked from a paste-mode REPL after
+# `import _ssh`. Embedding the bytes side-steps it entirely.
+SSHTEST_RENDERED="$(pwd)/sshtest-rendered.py"
+python3 - "$CLIENT_KEY" ./SSHTEST.PY "$SSHTEST_RENDERED" <<'PYEOF'
+import sys
+key = open(sys.argv[1], "rb").read()
+# repr() gives a valid Python bytes literal; strip the leading b'
+# and trailing ' since we already emit those in the template.
+lit = repr(key)[2:-1]
+src = open(sys.argv[2]).read()
+src = src.replace("__CLIENT_KEY_BYTES__", lit)
+open(sys.argv[3], "w").write(src)
+PYEOF
+# Paste-mode wrap so MP REPL ingests the rendered script in one
+# block, matching the TLS rig's COM1 paste-mode pattern.
 SSHTEST_WRAPPED="$(pwd)/sshtest-wrapped.in"
 {
     printf '\x05'
-    cat ./SSHTEST.PY
+    cat "$SSHTEST_RENDERED"
     printf '\x04'
     printf '\n\x04'
 } > "$SSHTEST_WRAPPED"
-mcopy -i "$TEST_IMG" -o ./SSHTEST.PY ::SSHTEST.PY
+mcopy -i "$TEST_IMG" -o "$SSHTEST_RENDERED" ::SSHTEST.PY
 
 AUTOEXEC=$(mktemp)
 {

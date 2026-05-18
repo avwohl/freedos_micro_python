@@ -131,6 +131,10 @@ _orig_h._parse_kexecdh_init = _dump_parse_init
 
 HERE = Path(__file__).resolve().parent
 
+# Populated by serve_one() from ssh_client_ed25519.pub before
+# transport.start_server hands control to Server.check_auth_publickey.
+CLIENT_PUBKEY = None
+
 
 class Server(paramiko.ServerInterface):
     def __init__(self, files):
@@ -145,8 +149,20 @@ class Server(paramiko.ServerInterface):
             return paramiko.AUTH_SUCCESSFUL
         return paramiko.AUTH_FAILED
 
+    def check_auth_publickey(self, username, key):
+        # CLIENT_PUBKEY is loaded from ssh_client_ed25519.pub by
+        # serve_one() at startup. We accept any user as long as the
+        # offered key matches.
+        if CLIENT_PUBKEY is not None and key == CLIENT_PUBKEY:
+            print(f"[ssh-server] pubkey auth ok for {username!r}",
+                  flush=True)
+            return paramiko.AUTH_SUCCESSFUL
+        print(f"[ssh-server] pubkey auth FAILED for {username!r}",
+              flush=True)
+        return paramiko.AUTH_FAILED
+
     def get_allowed_auths(self, username):
-        return "password"
+        return "password,publickey"
 
     def check_channel_request(self, kind, chanid):
         if kind == "session":
@@ -172,7 +188,9 @@ class Server(paramiko.ServerInterface):
 
 def _handle_exec(channel, cmd, server):
     """Run on a daemon thread per exec channel. Handles either an SCP
-    command (delegates to _scp_serve) or the plain SSH_RIG_OK marker."""
+    command (delegates to _scp_serve) or a tiny `echo TOKEN`
+    impl that lets the rig differentiate the password vs publickey
+    auth paths by what they ask for."""
     try:
         if cmd.startswith("scp "):
             ok = _scp_serve(channel, cmd, server.files)
@@ -180,10 +198,16 @@ def _handle_exec(channel, cmd, server):
             print(f"[ssh-server] scp #{server.scp_count} "
                   f"{'ok' if ok else 'FAIL'}: {cmd!r}", flush=True)
             channel.send_exit_status(0 if ok else 1)
+        elif cmd.startswith("echo "):
+            arg = cmd[len("echo "):]
+            payload = (arg + "\n").encode("utf-8")
+            channel.sendall(payload)
+            channel.send_exit_status(0)
+            print(f"[ssh-server] echo'd {arg!r} for {cmd!r}", flush=True)
         else:
             channel.sendall(b"SSH_RIG_OK\n")
             channel.send_exit_status(0)
-            print(f"[ssh-server] sent marker for {cmd!r}", flush=True)
+            print(f"[ssh-server] sent default marker for {cmd!r}", flush=True)
     except Exception as e:
         print(f"[ssh-server] handler error on {cmd!r}: {e}", flush=True)
     finally:
@@ -438,7 +462,20 @@ paramiko.SFTPHandle.close = _sftp_handle_close
 
 
 def serve_one(port: int, host_key_path: Path, max_seconds: float) -> int:
+    global CLIENT_PUBKEY
     host_key = paramiko.Ed25519Key(filename=str(host_key_path))
+    client_pub_path = host_key_path.parent / "ssh_client_ed25519.pub"
+    if client_pub_path.exists():
+        # ssh-keygen .pub format is "ssh-ed25519 BASE64 comment"; the
+        # middle field is the same SSH wire blob paramiko's
+        # Ed25519Key takes via from_string_data.
+        import base64
+        parts = client_pub_path.read_text().split()
+        if len(parts) >= 2 and parts[0] == "ssh-ed25519":
+            blob = base64.b64decode(parts[1])
+            CLIENT_PUBKEY = paramiko.Ed25519Key(data=blob)
+            print(f"[ssh-server] loaded client pubkey: {parts[2] if len(parts) >= 3 else ''}",
+                  flush=True)
 
     # Seed an SFTP file the rig client will fetch + verify, and pre-
     # create the path the client will upload to. The SCP rig shares the
@@ -454,40 +491,54 @@ def serve_one(port: int, host_key_path: Path, max_seconds: float) -> int:
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind(("0.0.0.0", port))
-    sock.listen(1)
-    sock.settimeout(max_seconds)
+    sock.listen(2)
     print(f"[ssh-server] listening on 0.0.0.0:{port}", flush=True)
 
-    try:
-        client, addr = sock.accept()
-    except socket.timeout:
-        print("[ssh-server] timeout waiting for connection", flush=True)
-        return 1
-    print(f"[ssh-server] connection from {addr}", flush=True)
-
-    transport = paramiko.Transport(client)
-    transport.add_server_key(host_key)
-    # Register the SFTP subsystem so sess.sftp() finds something
-    # behind the "sftp" channel-subsystem request.
-    transport.set_subsystem_handler("sftp", paramiko.SFTPServer,
-                                     _InMemorySFTPServer)
-    server = Server(_InMemorySFTPServer.files)
-    try:
-        transport.start_server(server=server)
-    except paramiko.SSHException as e:
-        print(f"[ssh-server] handshake failed: {e}", flush=True)
-        return 2
-    print(f"[ssh-server] handshake ok; cipher={transport.local_cipher}", flush=True)
-
-    # Exec channels (plain + SCP) are dispatched per-channel by
-    # check_channel_exec_request → daemon thread. SFTP runs in
-    # paramiko's subsystem-handler thread. So here we just keep
-    # the transport alive until the client disconnects (or the rig's
-    # outer timeout fires).
+    # Two sequential connections expected: one for password auth +
+    # exec/sftp/scp coverage, a second for publickey auth. The
+    # second-connection wait shares the same deadline budget.
     deadline = time.time() + max_seconds
-    while transport.is_active() and time.time() < deadline:
-        time.sleep(0.5)
-    print("[ssh-server] transport closed; "
+    conn_idx = 0
+    while time.time() < deadline:
+        conn_idx += 1
+        remaining = max(deadline - time.time(), 0.5)
+        sock.settimeout(remaining)
+        try:
+            client, addr = sock.accept()
+        except socket.timeout:
+            print(f"[ssh-server] no more connections after #{conn_idx - 1}",
+                  flush=True)
+            break
+        print(f"[ssh-server] connection #{conn_idx} from {addr}", flush=True)
+
+        transport = paramiko.Transport(client)
+        transport.add_server_key(host_key)
+        transport.set_subsystem_handler("sftp", paramiko.SFTPServer,
+                                         _InMemorySFTPServer)
+        server = Server(_InMemorySFTPServer.files)
+        try:
+            transport.start_server(server=server)
+        except paramiko.SSHException as e:
+            print(f"[ssh-server] handshake #{conn_idx} failed: {e}",
+                  flush=True)
+            continue
+        print(f"[ssh-server] handshake #{conn_idx} ok; cipher={transport.local_cipher}",
+              flush=True)
+
+        # Exec channels (plain + SCP) are dispatched per-channel by
+        # check_channel_exec_request → daemon thread. SFTP runs in
+        # paramiko's subsystem-handler thread. Spin until this
+        # transport closes or the global deadline fires; then loop
+        # back for the next connection.
+        while transport.is_active() and time.time() < deadline:
+            time.sleep(0.5)
+        try:
+            transport.close()
+        except Exception:
+            pass
+        print(f"[ssh-server] transport #{conn_idx} closed", flush=True)
+
+    print("[ssh-server] all transports closed; "
           f"sftp files seen: {sorted(_InMemorySFTPServer.files.items())}",
           flush=True)
     return 0

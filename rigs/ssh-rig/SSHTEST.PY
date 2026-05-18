@@ -4,9 +4,17 @@ import lwip
 import uc386_net
 import socket
 import _ssh
+# Pubkey-auth identity, embedded by run-ssh-rig.sh at rig build
+# time. (Empirically, `open()`-from-floppy hangs MP for some not-
+# yet-pinned reason after _ssh imports in the paste-mode REPL —
+# avoid file I/O during the test by inlining the key.)
+CLIENT_PRIVKEY = (
+    b'__CLIENT_KEY_BYTES__'
+)
 print('SSHTEST: start')
 print('SSHTEST: version=' + str(_ssh.version()))
 print('SSHTEST: engine=' + str(_ssh.crypto_engine_name()))
+print('SSHTEST: privkey_len=' + str(len(CLIENT_PRIVKEY)))
 _ = lwip.reset()
 print('SSHTEST: post_lwip_reset')
 rc = uc386_net.eth_init(False)
@@ -118,7 +126,40 @@ try:
 except OSError as e:
     print('SSHTEST: scp_failed', e)
 
-if exec_pass and sftp_pass and sftp_fsops_pass and scp_pass:
+sess.close()
+print('SSHTEST: sess1_closed')
+try:
+    s.close()
+except Exception as _e:
+    print('SSHTEST: s1_close_failed', _e)
+print('SSHTEST: s1_closed')
+
+# Pubkey auth on a SECOND session: paramiko's transport finishes auth
+# once and won't re-auth on the same connection, so this needs a
+# fresh TCP socket + Session(). The rig server loops accept() so it
+# picks up the next connection within the rig deadline.
+pubkey_pass = False
+try:
+    if CLIENT_PRIVKEY is None:
+        raise OSError("no key loaded at startup")
+    privkey = CLIENT_PRIVKEY
+    addr2 = socket.getaddrinfo('10.0.2.2', 2222)[0][-1]
+    s2 = socket.socket()
+    s2.connect(addr2)
+    s2.settimeout(0.1)
+    print('SSHTEST: pk_connected')
+    sess2 = _ssh.Session(s2)
+    print('SSHTEST: pk_handshake_ok')
+    sess2.userauth_publickey('pkuser', privkey)
+    print('SSHTEST: pk_auth_ok')
+    out2 = sess2.exec('echo PUBKEY_RIG_OK')
+    print('SSHTEST: pk_exec_len=' + str(len(out2)))
+    pubkey_pass = b'PUBKEY_RIG_OK' in out2
+    sess2.close()
+except OSError as e:
+    print('SSHTEST: pubkey_failed', e)
+
+if exec_pass and sftp_pass and sftp_fsops_pass and scp_pass and pubkey_pass:
     # Leading \n so the rig's `grep -qE '^SSHTEST: PASS\r?$'` matches
     # even when the line gets prefixed by diagnostic markers from
     # the libssh2/lwIP/axtls code (e.g. [hu:...]).
@@ -127,5 +168,5 @@ else:
     sys.stdout.write('\nSSHTEST: FAIL_unexpected_response exec=' + str(exec_pass)
                      + ' sftp=' + str(sftp_pass)
                      + ' sftp_fsops=' + str(sftp_fsops_pass)
-                     + ' scp=' + str(scp_pass) + '\n')
-sess.close()
+                     + ' scp=' + str(scp_pass)
+                     + ' pubkey=' + str(pubkey_pass) + '\n')

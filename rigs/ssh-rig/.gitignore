@@ -6,3 +6,6 @@ ssh-server.log
 sshtest-wrapped.in
 ssh_host_ed25519
 ssh_host_ed25519.pub
+ssh_client_ed25519
+ssh_client_ed25519.pub
+sshtest-rendered.py
