@@ -112,6 +112,24 @@ the test passed.
     (4) `ssh_server.py` registers `SFTPServer` via
     `set_subsystem_handler`, (5) `SSHTEST.PY` PASS print is
     leading-`\n` so the rig's column-anchored grep catches it.
+  - **SFTP filesystem-ops surface** (commits `09064fe` +
+    `8eadb57`). `session.sftp()` now exposes `opendir` (→ `SFTPDir`
+    with `.read()` → `(name, attrs)` | `None`), `mkdir`, `rmdir`,
+    `unlink`, `rename`, `stat`, `realpath` on top of the existing
+    `open`/`read`/`write`. Attrs surface as a 6-tuple
+    `(mode, size, atime, mtime, uid, gid)` with absent fields
+    zeroed. Rig coverage: `_InMemorySFTPServer` in `ssh_server.py`
+    grows `stat`/`list_folder`/`mkdir`/`rmdir`/`remove`/`rename`
+    impls over the same in-RAM dict + parallel `dirs` set, and
+    SSHTEST.PY's new `sftp_fsops` slice round-trips
+    realpath → opendir → stat → mkdir → rename → unlink → rmdir
+    against `/sftp` in the same SSH session. PASS now gates on it.
+    `examples/sftp.py` was rewritten as an interactive `sftp(1)`-
+    style shell (`sftp> ls / cd / get / put / mkdir / ...`)
+    consuming the new surface; old `get`/`put` subcommand form +
+    auto-dispatched `host:/path local` shorthand kept for
+    back-compat. `chmod` stubs out — `libssh2_sftp_setstat` isn't
+    wrapped yet.
   - **SCP round-trip working end-to-end** (commit `3258120`).
     `session.scp_recv(path)` + `session.scp_send(path, mode, data)`
     wrap `libssh2_scp_recv2` / `libssh2_scp_send_ex`. The rig
