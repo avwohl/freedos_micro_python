@@ -112,6 +112,24 @@ the test passed.
     (4) `ssh_server.py` registers `SFTPServer` via
     `set_subsystem_handler`, (5) `SSHTEST.PY` PASS print is
     leading-`\n` so the rig's column-anchored grep catches it.
+  - **SCP round-trip working end-to-end** (commit `3258120`).
+    `session.scp_recv(path)` + `session.scp_send(path, mode, data)`
+    wrap `libssh2_scp_recv2` / `libssh2_scp_send_ex`. The rig
+    downloads + uploads in the same session that ran exec and SFTP,
+    against a small in-process SCP server inside `ssh_server.py`
+    (handles both `-t` / `-f` plus the `-p` T-line branch). Three
+    fixes landed together: (1) libssh2's SCP C-line snprintf uses
+    `"C0%o %lld %s\n"` which uc386's snprintf garbles (`%o` and
+    `%lld` both eaten without reading args) — patched via
+    `patch_libssh2_scp_int64_format` in `fetch.sh` to hardcode
+    `"0644"` and use `"%ld"` with a `(long)` cast on size,
+    (2) `scp_recv` passes `NULL` for `sb` so libssh2 omits `-p`
+    and the server doesn't need to send a T-line first; recv reads
+    until CHANNEL_EOF or 20 EAGAINs with data buffered (paramiko
+    sometimes drops the post-exec EOF), (3) `scp_send` writes the
+    SCP trailing `\0` after the payload before `send_eof` —
+    omitting it leaves the server unsure when the file ended and
+    server-side persistence was bailed.
 
 ## Things to fix next
 
@@ -119,11 +137,9 @@ the test passed.
    `port/libssh2_axtls.c`. Currently stubs returning `-1`. Needed
    for non-ed25519 server keys and DH-group KEX fallback.
 
-2. **SCP** — `examples/scp.py`, plus `session.scp_recv()` /
-   `session.scp_send()` in `port/modssh_uc386dos.c`. libssh2 has
-   `libssh2_scp_recv2` / `libssh2_scp_send_ex` which return a
-   channel; wrap those. SFTP is the harder protocol and now
-   works, so SCP should be a small addition.
+2. **Public-key auth** — `session.userauth_publickey(user, key)`
+   wraps `libssh2_userauth_publickey_fromfile_ex`. Today only
+   password auth is exposed.
 
 3. **Expose POSIX TCP_NODELAY in modlwip.** modlwip's `case
    TCP_NODELAY:` switch matches on the lwIP `TF_NODELAY = 0x40`
