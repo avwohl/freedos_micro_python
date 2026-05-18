@@ -98,6 +98,20 @@ the test passed.
     `rigs/tls-rig/run-tls-rig.sh` now exits rc=0 with
     `TLSTEST: PASS`, `data_len 25`. The same uc386 + multi-block
     SHA / AES fixes that unblocked SSH were the underlying issue.
+  - **SFTP round-trip working end-to-end** (commit `1f2c7b5`).
+    `session.sftp()`, `SFTP.open(path, mode)`, `SFTPFile.read/write/close`
+    wired to libssh2's SFTP API. The rig downloads then uploads a
+    marker through the same SSH session it ran exec on, against a
+    paramiko `SFTPServer` backed by an in-memory dict. Five fixes
+    had to land together: (1) `_libssh2_wait_socket` patched to
+    drive lwIP's poll hook + a 50 ms delay instead of `select()`
+    on our fake fd, (2) socket settimeout(0.1) + recv-callback
+    maps ETIMEDOUT→EAGAIN so `channel_write`'s drain-incoming
+    loop can exit, (3) `tcp_output_nagle` → `tcp_output` so small
+    encrypted SSH packets aren't held by Nagle/delayed-ACK,
+    (4) `ssh_server.py` registers `SFTPServer` via
+    `set_subsystem_handler`, (5) `SSHTEST.PY` PASS print is
+    leading-`\n` so the rig's column-anchored grep catches it.
 
 ## Things to fix next
 
@@ -105,9 +119,11 @@ the test passed.
    `port/libssh2_axtls.c`. Currently stubs returning `-1`. Needed
    for non-ed25519 server keys and DH-group KEX fallback.
 
-2. **SFTP/SCP** — `examples/sftp.py`, `examples/scp.py`, plus an
-   `session.sftp()` API in `port/modssh_uc386dos.c`. The exec
-   path proves channel I/O works; SFTP is structurally similar.
+2. **SCP** — `examples/scp.py`, plus `session.scp_recv()` /
+   `session.scp_send()` in `port/modssh_uc386dos.c`. libssh2 has
+   `libssh2_scp_recv2` / `libssh2_scp_send_ex` which return a
+   channel; wrap those. SFTP is the harder protocol and now
+   works, so SCP should be a small addition.
 
 3. **Expose POSIX TCP_NODELAY in modlwip.** modlwip's `case
    TCP_NODELAY:` switch matches on the lwIP `TF_NODELAY = 0x40`
