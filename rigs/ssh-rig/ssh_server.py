@@ -28,6 +28,19 @@ import paramiko
 logging.basicConfig(level=logging.DEBUG, format="[paramiko] %(message)s")
 paramiko.util.log_to_file("/tmp/paramiko-server.log", level="DEBUG")
 
+# paramiko's `Exception in subsystem handler` log just `format`s the
+# exception, which often yields an empty string. Patch start_subsystem
+# to dump the traceback to stderr so we can see WHAT failed.
+import traceback
+_orig_start_sub = paramiko.SubsystemHandler.start_subsystem
+def _patched_start_sub(self, *a, **kw):
+    try:
+        return _orig_start_sub(self, *a, **kw)
+    except BaseException:
+        print("[paramiko-traceback]", traceback.format_exc(), flush=True)
+        raise
+paramiko.SubsystemHandler.start_subsystem = _patched_start_sub
+
 # Tap raw socket recv to see if encrypted SERVICE_REQUEST actually arrives.
 import paramiko.packet as _ppkt
 _orig_read_all = _ppkt.Packetizer.read_all
@@ -145,8 +158,59 @@ class Server(paramiko.ServerInterface):
         return True
 
 
+class _InMemorySFTPServer(paramiko.SFTPServerInterface):
+    """In-RAM SFTP backend so the rig has full control over what the
+    client reads / writes. `files` is a {path: bytes} dict the rig
+    seeds before the client connects, and the rig inspects after."""
+
+    files = {}  # populated by serve_one() before transport.start_server
+
+    def open(self, path, flags, attr):
+        import os as _os
+        if flags & _os.O_WRONLY or flags & _os.O_RDWR:
+            # Write/create — start fresh if O_TRUNC, else preserve.
+            if flags & _os.O_TRUNC:
+                _InMemorySFTPServer.files[path] = b""
+            elif path not in _InMemorySFTPServer.files:
+                _InMemorySFTPServer.files[path] = b""
+        else:
+            # Read — must already exist.
+            if path not in _InMemorySFTPServer.files:
+                return paramiko.SFTP_NO_SUCH_FILE
+        h = paramiko.SFTPHandle(flags)
+        h._rig_path = path
+        return h
+
+
+def _sftp_handle_read(self, offset, length):
+    data = _InMemorySFTPServer.files.get(self._rig_path, b"")
+    return data[offset:offset + length]
+
+
+def _sftp_handle_write(self, offset, data):
+    cur = _InMemorySFTPServer.files.get(self._rig_path, b"")
+    cur = cur.ljust(offset, b"\x00") + data + cur[offset + len(data):]
+    _InMemorySFTPServer.files[self._rig_path] = cur
+    return paramiko.SFTP_OK
+
+
+def _sftp_handle_close(self):
+    return paramiko.SFTP_OK
+
+
+# Patch SFTPHandle once at import time (avoids per-handle subclassing).
+paramiko.SFTPHandle.read = _sftp_handle_read
+paramiko.SFTPHandle.write = _sftp_handle_write
+paramiko.SFTPHandle.close = _sftp_handle_close
+
+
 def serve_one(port: int, host_key_path: Path, max_seconds: float) -> int:
     host_key = paramiko.Ed25519Key(filename=str(host_key_path))
+
+    # Seed an SFTP file the rig client will fetch + verify, and pre-
+    # create the path the client will upload to.
+    _InMemorySFTPServer.files["/sftp/download.txt"] = b"SFTP_RIG_OK_DL\n"
+    _InMemorySFTPServer.files["/sftp/upload.txt"] = b""
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -164,6 +228,10 @@ def serve_one(port: int, host_key_path: Path, max_seconds: float) -> int:
 
     transport = paramiko.Transport(client)
     transport.add_server_key(host_key)
+    # Register the SFTP subsystem so sess.sftp() finds something
+    # behind the "sftp" channel-subsystem request.
+    transport.set_subsystem_handler("sftp", paramiko.SFTPServer,
+                                     _InMemorySFTPServer)
     server = Server()
     try:
         transport.start_server(server=server)
@@ -178,17 +246,28 @@ def serve_one(port: int, host_key_path: Path, max_seconds: float) -> int:
         return 3
     print("[ssh-server] channel opened", flush=True)
 
-    # Wait for the exec request to land.
-    if not server.event.wait(timeout=max_seconds):
-        print("[ssh-server] timed out waiting for exec", flush=True)
-        return 4
-    print(f"[ssh-server] exec command: {server.command!r}", flush=True)
+    # Wait briefly for an exec request. SFTP-only tests won't fire
+    # an exec — let those proceed to the accept() below.
+    if server.event.wait(timeout=2.0):
+        print(f"[ssh-server] exec command: {server.command!r}", flush=True)
+        channel.sendall(b"SSH_RIG_OK\n")
+        channel.send_exit_status(0)
+        channel.close()
+        print("[ssh-server] sent exec marker", flush=True)
+    else:
+        print("[ssh-server] no exec request; skipping marker", flush=True)
 
-    channel.sendall(b"SSH_RIG_OK\n")
-    channel.send_exit_status(0)
-    channel.close()
-    transport.close()
-    print("[ssh-server] sent marker; closed", flush=True)
+    # Keep the transport alive until the client disconnects (or the
+    # rig hits its own outer timeout). SFTP is wired via
+    # set_subsystem_handler and runs in a background thread spawned
+    # by paramiko's transport — we don't need to accept() a new
+    # channel here. Polling transport.is_active() avoids tearing the
+    # connection down while the client is mid-SFTP.
+    while transport.is_active():
+        time.sleep(0.5)
+    print("[ssh-server] transport closed; "
+          f"sftp files seen: {sorted(_InMemorySFTPServer.files.items())}",
+          flush=True)
     return 0
 
 

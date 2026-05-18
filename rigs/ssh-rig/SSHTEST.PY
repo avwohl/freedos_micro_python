@@ -28,6 +28,11 @@ except OSError as e:
     print('SSHTEST: connect_failed', e)
     sys.exit(2)
 print('SSHTEST: tcp_connected')
+# Cap blocking-recv with a 100 ms timeout so libssh2's `channel_write`
+# drain-incoming loop (`while (transport_read > 0)`) can exit when
+# nothing new is queued. Without this, the drain blocks forever
+# waiting for a packet that won't come, and SFTP_INIT never goes out.
+s.settimeout(0.1)
 try:
     sess = _ssh.Session(s)
 except OSError as e:
@@ -46,8 +51,34 @@ except OSError as e:
     print('SSHTEST: exec_failed', e)
     sys.exit(5)
 print('SSHTEST: exec_ok len=' + str(len(out)))
-if b'SSH_RIG_OK' in out:
-    print('SSHTEST: PASS')
+exec_pass = b'SSH_RIG_OK' in out
+
+# SFTP round-trip on the same SSH session: download a seeded file
+# then upload a marker the server can verify.
+sftp_pass = False
+try:
+    sftp = sess.sftp()
+    print('SSHTEST: sftp_opened')
+    f = sftp.open('/sftp/download.txt', 'r')
+    dl = f.read()
+    f.close()
+    print('SSHTEST: sftp_dl_len=' + str(len(dl)))
+    if b'SFTP_RIG_OK_DL' in dl:
+        f = sftp.open('/sftp/upload.txt', 'w')
+        n = f.write(b'SFTP_RIG_OK_UL\n')
+        f.close()
+        print('SSHTEST: sftp_ul_len=' + str(n))
+        sftp_pass = (n == 15)
+    sftp.close()
+except OSError as e:
+    print('SSHTEST: sftp_failed', e)
+
+if exec_pass and sftp_pass:
+    # Leading \n so the rig's `grep -qE '^SSHTEST: PASS\r?$'` matches
+    # even when the line gets prefixed by diagnostic markers from
+    # the libssh2/lwIP/axtls code (e.g. [hu:...]).
+    sys.stdout.write('\nSSHTEST: PASS\n')
 else:
-    print('SSHTEST: FAIL_unexpected_response')
+    sys.stdout.write('\nSSHTEST: FAIL_unexpected_response exec=' + str(exec_pass)
+                     + ' sftp=' + str(sftp_pass) + '\n')
 sess.close()

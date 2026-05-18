@@ -74,6 +74,17 @@ fetch_lwip() {
 patch_modlwip_loopback_poll() {
     F="upstream/extmod/modlwip.c"
     if [ ! -f "$F" ]; then return 0; fi
+    # Force tcp_output (no Nagle). Separately idempotent so we
+    # can land it after the loopback_poll patch is already in
+    # place. Tens-of-seconds deadlocks happen otherwise because
+    # the small SFTP_INIT (and other small SSH packets) sit in
+    # the TCP buffer waiting for an ACK that won't come — the
+    # single-threaded cooperative scheduler has libssh2's
+    # BLOCK_ADJUST loop with nothing else to drive the socket.
+    if ! grep -q "uc386-dos: force tcp_output" "$F"; then
+        sed -i.bak 's|err = tcp_output_nagle(socket->pcb.tcp);|err = tcp_output(socket->pcb.tcp);  /* uc386-dos: force tcp_output -- see fetch.sh */|' "$F"
+        rm -f "$F.bak"
+    fi
     if grep -q "uc386dos_loopback_poll" "$F"; then return 0; fi
     if ! grep -q "lwip_poll_list.poll = NULL;" "$F"; then
         echo "micropython: warn: modlwip.c reset shape changed — skipping loopback patch." >&2
@@ -599,6 +610,39 @@ patch_libssh2_sftp_handle_enum() {
     ' "$F"
 }
 
+patch_libssh2_wait_socket() {
+    # libssh2's `_libssh2_wait_socket()` (session.c) does
+    # `select(session->socket_fd + 1, ...)`. session->socket_fd
+    # came from the `libssh2_socket_t sock` arg to
+    # `libssh2_session_handshake()`, which we set to 0 — our SSH
+    # I/O rides MP's stream protocol via callbacks (recv/send),
+    # not a POSIX fd. So select() either returns immediately on
+    # stdin or errors out ("Error waiting on socket"). The
+    # blocking-mode BLOCK_ADJUST wrapper hits this whenever
+    # libssh2 returns EAGAIN, breaking the SFTP startup path
+    # which is heavily state-machine-driven.
+    #
+    # Patch _libssh2_wait_socket to a short-sleep no-op so
+    # BLOCK_ADJUST just loops back into the operation — our
+    # recv callback blocks in mp_stream_posix_read for real I/O
+    # waiting, which is the right behavior under FreeDOS/lwIP.
+    # Idempotent.
+    F="upstream/lib/libssh2/src/session.c"
+    [ -f "$F" ] || return 0
+    if grep -q "uc386-dos: wait_socket no-op" "$F"; then
+        return 0
+    fi
+    echo "micropython: patching libssh2 _libssh2_wait_socket -> short delay ..."
+    # Replace the function body with a short delay (lets lwIP run
+    # sys_check_timeouts + drain the netif RX queue) then return 0
+    # so BLOCK_ADJUST retries the underlying operation. Avoids the
+    # original select() on session->socket_fd, which we set to 0
+    # because our I/O rides MP's stream protocol via callbacks.
+    perl -0777 -i -pe '
+        s/(int _libssh2_wait_socket\(LIBSSH2_SESSION \*session, time_t start_time\)\n\{\n).*?\n\}\n/$1    \/\* uc386-dos: wait_socket -- see fetch.sh *\/\n    extern void uc386dos_loopback_poll(void *arg);\n    extern void sys_check_timeouts(void);\n    extern void mp_hal_delay_ms(unsigned int ms);\n    (void)session; (void)start_time;\n    uc386dos_loopback_poll(0);\n    sys_check_timeouts();\n    mp_hal_delay_ms(50);\n    return 0;\n}\n/s;
+    ' "$F"
+}
+
 patch_libssh2_bsd_types() {
     # libssh2's chacha.h / cipher-chachapoly.h use BSD typedefs
     # `u_int` and `u_char` which uc386's libc doesn't ship. crypt.c
@@ -897,6 +941,7 @@ if [ -d upstream ]; then
     patch_libssh2_sftp_handle_enum
     patch_libssh2_crypto_engine_enum
     patch_libssh2_kex_ecsha_macro_hoist
+    patch_libssh2_wait_socket
     patch_tweetnacl_uc386dos
     exit 0
 fi
@@ -938,4 +983,5 @@ patch_libssh2_bsd_types
 patch_libssh2_sftp_handle_enum
 patch_libssh2_crypto_engine_enum
 patch_libssh2_kex_ecsha_macro_hoist
+patch_libssh2_wait_socket
 patch_tweetnacl_uc386dos

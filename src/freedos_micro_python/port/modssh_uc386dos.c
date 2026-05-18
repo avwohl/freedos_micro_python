@@ -27,6 +27,7 @@
 #include "py/binary.h"
 
 #include "libssh2.h"
+#include "libssh2_sftp.h"
 
 /* ---------- libssh2 init guard ---------- */
 static bool _ssh_initialized = false;
@@ -67,6 +68,18 @@ static ssize_t _ssh_recv_cb(libssh2_socket_t fd, void *buf, size_t len,
      * FIN: the queued packets carry the eof/close state, so the
      * next channel_read after the drain returns 0 cleanly. */
     if (n == 0) {
+        return -EAGAIN;
+    }
+    /* Same treatment for ETIMEDOUT (MP_ETIMEDOUT = 110): when the
+     * rig sets a short socket timeout to bound libssh2's
+     * `channel_write` drain-loop (which would otherwise block
+     * forever waiting for incoming packets that won't come), the
+     * recv returns -1 with errno = 110. Map to -EAGAIN so libssh2's
+     * drain loop and BLOCK_ADJUST treat it as "no data right now"
+     * and keep retrying instead of tearing the session down.
+     * uc386's libc doesn't expose ETIMEDOUT as a constant — we
+     * spell out the MP value (matches modlwip.c). */
+    if (n < 0 && errno == 110) {
         return -EAGAIN;
     }
     return n;
@@ -288,6 +301,178 @@ static mp_obj_t ssh_session_exec(mp_obj_t self_in, mp_obj_t cmd_in) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_2(ssh_session_exec_obj, ssh_session_exec);
 
+/* ---------- SFTP ---------- */
+
+typedef struct _mp_obj_ssh_sftp_t {
+    mp_obj_base_t base;
+    LIBSSH2_SFTP *sftp;
+    mp_obj_t session;   /* keep parent Session alive while sftp is open */
+} mp_obj_ssh_sftp_t;
+
+typedef struct _mp_obj_ssh_sftp_file_t {
+    mp_obj_base_t base;
+    LIBSSH2_SFTP_HANDLE *handle;
+    mp_obj_t sftp;      /* keep SFTP alive while a handle is open */
+} mp_obj_ssh_sftp_file_t;
+
+static const mp_obj_type_t ssh_sftp_type;
+static const mp_obj_type_t ssh_sftp_file_type;
+
+static mp_obj_t ssh_sftp_file_close(mp_obj_t self_in) {
+    mp_obj_ssh_sftp_file_t *self = MP_OBJ_TO_PTR(self_in);
+    if (self->handle != NULL) {
+        libssh2_sftp_close_handle(self->handle);
+        self->handle = NULL;
+    }
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(ssh_sftp_file_close_obj, ssh_sftp_file_close);
+
+static mp_obj_t ssh_sftp_file_read(size_t n_args, const mp_obj_t *args) {
+    mp_obj_ssh_sftp_file_t *self = MP_OBJ_TO_PTR(args[0]);
+    if (self->handle == NULL) {
+        mp_raise_OSError(MP_EBADF);
+    }
+    mp_obj_ssh_sftp_t *sftp = MP_OBJ_TO_PTR(self->sftp);
+    mp_obj_ssh_session_t *sess =
+        MP_OBJ_TO_PTR(((mp_obj_ssh_sftp_t *)sftp)->session);
+    /* If no size given, read until EOF. */
+    mp_int_t max_len = (n_args >= 2) ? mp_obj_get_int(args[1]) : -1;
+    vstr_t vstr;
+    vstr_init(&vstr, 1024);
+    char buf[1024];
+    for (;;) {
+        size_t want = (max_len < 0 || (mp_int_t)sizeof(buf) <= max_len)
+                          ? sizeof(buf)
+                          : (size_t)max_len;
+        ssize_t n = libssh2_sftp_read(self->handle, buf, want);
+        if (n > 0) {
+            vstr_add_strn(&vstr, buf, (size_t)n);
+            if (max_len > 0) {
+                max_len -= n;
+                if (max_len == 0) break;
+            }
+        } else if (n == 0) {
+            break;  /* EOF */
+        } else {
+            vstr_clear(&vstr);
+            _ssh_raise_session_error(sess->session, (int)n, "sftp_read");
+        }
+    }
+    return mp_obj_new_bytes_from_vstr(&vstr);
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(ssh_sftp_file_read_obj, 1, 2,
+                                             ssh_sftp_file_read);
+
+static mp_obj_t ssh_sftp_file_write(mp_obj_t self_in, mp_obj_t data_in) {
+    mp_obj_ssh_sftp_file_t *self = MP_OBJ_TO_PTR(self_in);
+    if (self->handle == NULL) {
+        mp_raise_OSError(MP_EBADF);
+    }
+    mp_buffer_info_t bufinfo;
+    mp_get_buffer_raise(data_in, &bufinfo, MP_BUFFER_READ);
+    const char *p = (const char *)bufinfo.buf;
+    size_t remaining = bufinfo.len;
+    mp_obj_ssh_sftp_t *sftp = MP_OBJ_TO_PTR(self->sftp);
+    mp_obj_ssh_session_t *sess = MP_OBJ_TO_PTR(sftp->session);
+    while (remaining > 0) {
+        ssize_t n = libssh2_sftp_write(self->handle, p, remaining);
+        if (n < 0) {
+            _ssh_raise_session_error(sess->session, (int)n, "sftp_write");
+        }
+        if (n == 0) break;
+        p += n;
+        remaining -= (size_t)n;
+    }
+    return MP_OBJ_NEW_SMALL_INT(bufinfo.len - remaining);
+}
+static MP_DEFINE_CONST_FUN_OBJ_2(ssh_sftp_file_write_obj, ssh_sftp_file_write);
+
+static const mp_rom_map_elem_t ssh_sftp_file_locals_dict_table[] = {
+    { MP_ROM_QSTR(MP_QSTR_read),  MP_ROM_PTR(&ssh_sftp_file_read_obj) },
+    { MP_ROM_QSTR(MP_QSTR_write), MP_ROM_PTR(&ssh_sftp_file_write_obj) },
+    { MP_ROM_QSTR(MP_QSTR_close), MP_ROM_PTR(&ssh_sftp_file_close_obj) },
+};
+static MP_DEFINE_CONST_DICT(ssh_sftp_file_locals_dict,
+                             ssh_sftp_file_locals_dict_table);
+
+MP_DEFINE_CONST_OBJ_TYPE(
+    ssh_sftp_file_type,
+    MP_QSTR_SFTPFile,
+    MP_TYPE_FLAG_NONE,
+    locals_dict, &ssh_sftp_file_locals_dict
+);
+
+static mp_obj_t ssh_sftp_open(size_t n_args, const mp_obj_t *args) {
+    mp_obj_ssh_sftp_t *self = MP_OBJ_TO_PTR(args[0]);
+    if (self->sftp == NULL) {
+        mp_raise_OSError(MP_EBADF);
+    }
+    const char *path = mp_obj_str_get_str(args[1]);
+    const char *mode = (n_args >= 3) ? mp_obj_str_get_str(args[2]) : "r";
+    /* Mode mapping: 'r' = read; 'w' = write+create+truncate. */
+    unsigned long flags;
+    long fmode = 0644;
+    if (mode[0] == 'w') {
+        flags = LIBSSH2_FXF_WRITE | LIBSSH2_FXF_CREAT | LIBSSH2_FXF_TRUNC;
+    } else {
+        flags = LIBSSH2_FXF_READ;
+    }
+    LIBSSH2_SFTP_HANDLE *h = libssh2_sftp_open(self->sftp, path, flags, fmode);
+    if (h == NULL) {
+        mp_obj_ssh_session_t *sess = MP_OBJ_TO_PTR(self->session);
+        _ssh_raise_session_error(sess->session, -1, "sftp_open");
+    }
+    mp_obj_ssh_sftp_file_t *fobj = mp_obj_malloc(mp_obj_ssh_sftp_file_t,
+                                                  &ssh_sftp_file_type);
+    fobj->handle = h;
+    fobj->sftp = MP_OBJ_FROM_PTR(self);
+    return MP_OBJ_FROM_PTR(fobj);
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(ssh_sftp_open_obj, 2, 3,
+                                             ssh_sftp_open);
+
+static mp_obj_t ssh_sftp_close(mp_obj_t self_in) {
+    mp_obj_ssh_sftp_t *self = MP_OBJ_TO_PTR(self_in);
+    if (self->sftp != NULL) {
+        libssh2_sftp_shutdown(self->sftp);
+        self->sftp = NULL;
+    }
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(ssh_sftp_close_obj, ssh_sftp_close);
+
+static const mp_rom_map_elem_t ssh_sftp_locals_dict_table[] = {
+    { MP_ROM_QSTR(MP_QSTR_open),  MP_ROM_PTR(&ssh_sftp_open_obj) },
+    { MP_ROM_QSTR(MP_QSTR_close), MP_ROM_PTR(&ssh_sftp_close_obj) },
+};
+static MP_DEFINE_CONST_DICT(ssh_sftp_locals_dict,
+                             ssh_sftp_locals_dict_table);
+
+MP_DEFINE_CONST_OBJ_TYPE(
+    ssh_sftp_type,
+    MP_QSTR_SFTP,
+    MP_TYPE_FLAG_NONE,
+    locals_dict, &ssh_sftp_locals_dict
+);
+
+static mp_obj_t ssh_session_sftp(mp_obj_t self_in) {
+    mp_obj_ssh_session_t *self = MP_OBJ_TO_PTR(self_in);
+    if (self->session == NULL) {
+        mp_raise_OSError(MP_EBADF);
+    }
+    LIBSSH2_SFTP *sftp = libssh2_sftp_init(self->session);
+    if (sftp == NULL) {
+        _ssh_raise_session_error(self->session, -1, "sftp_init");
+    }
+    mp_obj_ssh_sftp_t *sftp_obj = mp_obj_malloc(mp_obj_ssh_sftp_t,
+                                                  &ssh_sftp_type);
+    sftp_obj->sftp = sftp;
+    sftp_obj->session = self_in;
+    return MP_OBJ_FROM_PTR(sftp_obj);
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(ssh_session_sftp_obj, ssh_session_sftp);
+
 static mp_obj_t ssh_session_close(mp_obj_t self_in) {
     mp_obj_ssh_session_t *self = MP_OBJ_TO_PTR(self_in);
     if (self->session != NULL) {
@@ -303,6 +488,7 @@ static const mp_rom_map_elem_t ssh_session_locals_dict_table[] = {
     { MP_ROM_QSTR(MP_QSTR_userauth_password),
         MP_ROM_PTR(&ssh_session_userauth_password_obj) },
     { MP_ROM_QSTR(MP_QSTR_exec),  MP_ROM_PTR(&ssh_session_exec_obj) },
+    { MP_ROM_QSTR(MP_QSTR_sftp),  MP_ROM_PTR(&ssh_session_sftp_obj) },
     { MP_ROM_QSTR(MP_QSTR_close), MP_ROM_PTR(&ssh_session_close_obj) },
 };
 static MP_DEFINE_CONST_DICT(ssh_session_locals_dict,
