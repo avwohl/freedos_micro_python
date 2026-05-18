@@ -20,6 +20,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <errno.h>
+#include <sys/stat.h>  /* struct stat — used by libssh2_struct_stat */
 
 #include "py/runtime.h"
 #include "py/stream.h"
@@ -473,6 +474,135 @@ static mp_obj_t ssh_session_sftp(mp_obj_t self_in) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_1(ssh_session_sftp_obj, ssh_session_sftp);
 
+/* ---------- SCP ----------
+ *
+ * libssh2's SCP API is one-shot: each call opens a channel, runs `scp -t`
+ * or `scp -f` on the server, exchanges the SCP protocol (length-prefixed
+ * binary), and tears the channel down. No persistent SCP object — keep
+ * the wrappers as session methods returning bytes / int.
+ */
+
+/* session.scp_recv(path) — download a file, return its bytes. */
+static mp_obj_t ssh_session_scp_recv(mp_obj_t self_in, mp_obj_t path_in) {
+    mp_obj_ssh_session_t *self = MP_OBJ_TO_PTR(self_in);
+    if (self->session == NULL) {
+        mp_raise_OSError(MP_EBADF);
+    }
+    const char *path = mp_obj_str_get_str(path_in);
+    /* Pass NULL for `sb`: libssh2 emits `scp -f path` (without `-p`),
+     * so the server doesn't need to send a `T<mtime> 0 <atime> 0\n`
+     * time-info line. We surface neither size nor mtime/atime to
+     * Python, so the sb output isn't useful anyway. Drawback: no
+     * upfront file size, so we accumulate bytes until either the
+     * server's CHANNEL_EOF flips libssh2_channel_eof() to true, or
+     * we time out via the iteration cap (server didn't close —
+     * common with paramiko if the SSH transport teared down before
+     * channel.close() ran). */
+    LIBSSH2_CHANNEL *channel = libssh2_scp_recv2(self->session, path, NULL);
+    if (channel == NULL) {
+        _ssh_raise_session_error(self->session, -1, "scp_recv2");
+    }
+    vstr_t vstr;
+    vstr_init(&vstr, 256);
+    char buf[256];
+    int empty_polls = 0;
+    for (;;) {
+        ssize_t n = libssh2_channel_read(channel, buf, sizeof(buf));
+        if (n > 0) {
+            vstr_add_strn(&vstr, buf, (size_t)n);
+            empty_polls = 0;
+            if (libssh2_channel_eof(channel)) {
+                break;
+            }
+        } else if (n == 0) {
+            break;
+        } else if ((int)n == LIBSSH2_ERROR_EAGAIN) {
+            /* libssh2_channel_read already waited via BLOCK_ADJUST →
+             * our wait_socket shim. If we hit EAGAIN repeatedly after
+             * receiving some bytes — and CHANNEL_EOF still hasn't
+             * arrived — the server isn't sending more. Bail with what
+             * we have. paramiko's transport sometimes drops the
+             * CHANNEL_EOF after the SCP exec finishes, which would
+             * otherwise spin here forever. */
+            if (vstr_len(&vstr) > 0 && ++empty_polls > 20) {
+                break;
+            }
+            continue;
+        } else if ((int)n == LIBSSH2_ERROR_SOCKET_RECV ||
+                   (int)n == LIBSSH2_ERROR_SOCKET_DISCONNECT) {
+            break;
+        } else {
+            vstr_clear(&vstr);
+            libssh2_channel_free(channel);
+            _ssh_raise_session_error(self->session, (int)n, "scp_channel_read");
+        }
+    }
+    /* Strip the SCP trailing \0 terminator if present (server appends
+     * \0 after the file payload as the SCP end-of-data marker). */
+    if (vstr_len(&vstr) > 0 && vstr.buf[vstr_len(&vstr) - 1] == '\0') {
+        vstr.len--;
+    }
+    libssh2_channel_close(channel);
+    libssh2_channel_free(channel);
+    return mp_obj_new_bytes_from_vstr(&vstr);
+}
+static MP_DEFINE_CONST_FUN_OBJ_2(ssh_session_scp_recv_obj, ssh_session_scp_recv);
+
+/* session.scp_send(path, mode, data) — upload data to path with the given
+ * unix mode (e.g. 0o644). Returns number of bytes written. */
+static mp_obj_t ssh_session_scp_send(size_t n_args, const mp_obj_t *args) {
+    (void)n_args;
+    mp_obj_ssh_session_t *self = MP_OBJ_TO_PTR(args[0]);
+    if (self->session == NULL) {
+        mp_raise_OSError(MP_EBADF);
+    }
+    const char *path = mp_obj_str_get_str(args[1]);
+    int mode = mp_obj_get_int(args[2]);
+    mp_buffer_info_t bi;
+    mp_get_buffer_raise(args[3], &bi, MP_BUFFER_READ);
+    LIBSSH2_CHANNEL *channel = libssh2_scp_send_ex(self->session, path, mode,
+                                                    (libssh2_int64_t)bi.len,
+                                                    0, 0);
+    if (channel == NULL) {
+        _ssh_raise_session_error(self->session, -1, "scp_send_ex");
+    }
+    const char *p = (const char *)bi.buf;
+    size_t remaining = bi.len;
+    while (remaining > 0) {
+        ssize_t n = libssh2_channel_write(channel, p, remaining);
+        if ((int)n == LIBSSH2_ERROR_EAGAIN) {
+            continue;
+        }
+        if (n < 0) {
+            libssh2_channel_free(channel);
+            _ssh_raise_session_error(self->session, (int)n, "scp_channel_write");
+        }
+        p += n;
+        remaining -= (size_t)n;
+    }
+    /* SCP protocol: send the trailing \0 terminator after the file
+     * payload. Some servers gate persistence on receiving this byte
+     * (libssh2's own scp_recv does), so omitting it leaves the
+     * server-side file empty even though every data byte was sent.
+     * We don't wait for the server's final-ack \0 — the server
+     * tears the channel down after persisting, and `_libssh2_wait_socket`
+     * would just spin. */
+    {
+        const char nul = '\0';
+        for (;;) {
+            ssize_t n = libssh2_channel_write(channel, &nul, 1);
+            if (n == 1) break;
+            if ((int)n != LIBSSH2_ERROR_EAGAIN) break;
+        }
+    }
+    libssh2_channel_send_eof(channel);
+    libssh2_channel_close(channel);
+    libssh2_channel_free(channel);
+    return mp_obj_new_int((mp_int_t)bi.len);
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(ssh_session_scp_send_obj, 4, 4,
+                                             ssh_session_scp_send);
+
 static mp_obj_t ssh_session_close(mp_obj_t self_in) {
     mp_obj_ssh_session_t *self = MP_OBJ_TO_PTR(self_in);
     if (self->session != NULL) {
@@ -489,6 +619,8 @@ static const mp_rom_map_elem_t ssh_session_locals_dict_table[] = {
         MP_ROM_PTR(&ssh_session_userauth_password_obj) },
     { MP_ROM_QSTR(MP_QSTR_exec),  MP_ROM_PTR(&ssh_session_exec_obj) },
     { MP_ROM_QSTR(MP_QSTR_sftp),  MP_ROM_PTR(&ssh_session_sftp_obj) },
+    { MP_ROM_QSTR(MP_QSTR_scp_recv), MP_ROM_PTR(&ssh_session_scp_recv_obj) },
+    { MP_ROM_QSTR(MP_QSTR_scp_send), MP_ROM_PTR(&ssh_session_scp_send_obj) },
     { MP_ROM_QSTR(MP_QSTR_close), MP_ROM_PTR(&ssh_session_close_obj) },
 };
 static MP_DEFINE_CONST_DICT(ssh_session_locals_dict,

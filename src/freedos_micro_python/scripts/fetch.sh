@@ -643,6 +643,34 @@ patch_libssh2_wait_socket() {
     ' "$F"
 }
 
+patch_libssh2_scp_int64_format() {
+    # libssh2's scp.c builds the SCP C-line via
+    # `snprintf(buf, n, "C0%o %" LIBSSH2_INT64_T_FORMAT " %s\n", mode, size, base)`.
+    # On non-Windows, LIBSSH2_INT64_T_FORMAT is "lld" and `size` is
+    # `long long` (= libssh2_int64_t). Two uc386-specific issues:
+    #   1. uc386's snprintf doesn't recognize `%o` — the format
+    #      specifier is consumed but no arg is read, leaving just
+    #      the literal "o" in the output.
+    #   2. Same printf doesn't handle `%lld` — same kind of failure,
+    #      leaves "ld" literal in output.
+    # The result with both bugs: "C0o ld S\xff\n" instead of
+    # "C0644 14 upload.txt\n".
+    # Fix: hardcode mode as the literal "0644" (everything we send
+    # via scp_send is mode 0644 anyway — we don't surface mode to
+    # Python), and change the size format from "%lld" to "%ld" with
+    # an explicit `(long)size` cast. Files >2GB aren't a concern.
+    # Idempotent.
+    F="upstream/lib/libssh2/src/scp.c"
+    [ -f "$F" ] || return 0
+    if grep -q 'uc386-dos: SCP C-line format' "$F"; then
+        return 0
+    fi
+    echo "micropython: patching libssh2 SCP send C-line format ..."
+    perl -0777 -i -pe '
+        s/snprintf\(\(char \*\) session->scpSend_response,\s*\n\s*LIBSSH2_SCP_RESPONSE_BUFLEN, "C0%o %"\s*\n\s*LIBSSH2_INT64_T_FORMAT " %s\\n", mode,\s*\n\s*size, base\)/\/* uc386-dos: SCP C-line format -- see fetch.sh *\/\n            snprintf((char *) session->scpSend_response,\n                     LIBSSH2_SCP_RESPONSE_BUFLEN, "C0644 %ld %s\\n",\n                     (long)size, base); (void)mode;/s;
+    ' "$F"
+}
+
 patch_libssh2_bsd_types() {
     # libssh2's chacha.h / cipher-chachapoly.h use BSD typedefs
     # `u_int` and `u_char` which uc386's libc doesn't ship. crypt.c
@@ -942,6 +970,7 @@ if [ -d upstream ]; then
     patch_libssh2_crypto_engine_enum
     patch_libssh2_kex_ecsha_macro_hoist
     patch_libssh2_wait_socket
+    patch_libssh2_scp_int64_format
     patch_tweetnacl_uc386dos
     exit 0
 fi

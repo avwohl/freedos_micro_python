@@ -73,12 +73,26 @@ try:
 except OSError as e:
     print('SSHTEST: sftp_failed', e)
 
-if exec_pass and sftp_pass:
+# SCP round-trip on the same SSH session.
+scp_pass = False
+try:
+    dl = sess.scp_recv('/scp/download.txt')
+    print('SSHTEST: scp_dl_len=' + str(len(dl)))
+    scp_dl_pass = b'SCP_RIG_OK_DL' in dl
+    payload = b'SCP_RIG_OK_UL\n'
+    n = sess.scp_send('/scp/upload.txt', 0o644, payload)
+    print('SSHTEST: scp_ul_len=' + str(n))
+    scp_pass = scp_dl_pass and (n == len(payload))
+except OSError as e:
+    print('SSHTEST: scp_failed', e)
+
+if exec_pass and sftp_pass and scp_pass:
     # Leading \n so the rig's `grep -qE '^SSHTEST: PASS\r?$'` matches
     # even when the line gets prefixed by diagnostic markers from
     # the libssh2/lwIP/axtls code (e.g. [hu:...]).
     sys.stdout.write('\nSSHTEST: PASS\n')
 else:
     sys.stdout.write('\nSSHTEST: FAIL_unexpected_response exec=' + str(exec_pass)
-                     + ' sftp=' + str(sftp_pass) + '\n')
+                     + ' sftp=' + str(sftp_pass)
+                     + ' scp=' + str(scp_pass) + '\n')
 sess.close()

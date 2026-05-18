@@ -133,9 +133,12 @@ HERE = Path(__file__).resolve().parent
 
 
 class Server(paramiko.ServerInterface):
-    def __init__(self):
-        self.event = threading.Event()
-        self.command = None
+    def __init__(self, files):
+        self.event = threading.Event()    # set on first exec, kept for back-compat
+        self.command = None               # last exec command (for logging)
+        self.files = files
+        self.exec_count = 0
+        self.scp_count = 0
 
     def check_auth_password(self, username, password):
         if username == "testuser" and password == "testpass":
@@ -151,11 +154,149 @@ class Server(paramiko.ServerInterface):
         return paramiko.OPEN_FAILED_ADMINISTRATIVELY_PROHIBITED
 
     def check_channel_exec_request(self, channel, command):
-        # Stash and signal the main thread.
-        self.command = command.decode("utf-8", "replace") \
+        cmd = command.decode("utf-8", "replace") \
             if isinstance(command, bytes) else command
+        self.command = cmd
+        self.exec_count += 1
+        print(f"[ssh-server] exec request #{self.exec_count}: {cmd!r}",
+              flush=True)
+        # Dispatch in a daemon thread so this callback returns promptly
+        # and paramiko's transport loop can keep processing.
+        t = threading.Thread(target=_handle_exec,
+                              args=(channel, cmd, self),
+                              daemon=True)
+        t.start()
         self.event.set()
         return True
+
+
+def _handle_exec(channel, cmd, server):
+    """Run on a daemon thread per exec channel. Handles either an SCP
+    command (delegates to _scp_serve) or the plain SSH_RIG_OK marker."""
+    try:
+        if cmd.startswith("scp "):
+            ok = _scp_serve(channel, cmd, server.files)
+            server.scp_count += 1
+            print(f"[ssh-server] scp #{server.scp_count} "
+                  f"{'ok' if ok else 'FAIL'}: {cmd!r}", flush=True)
+            channel.send_exit_status(0 if ok else 1)
+        else:
+            channel.sendall(b"SSH_RIG_OK\n")
+            channel.send_exit_status(0)
+            print(f"[ssh-server] sent marker for {cmd!r}", flush=True)
+    except Exception as e:
+        print(f"[ssh-server] handler error on {cmd!r}: {e}", flush=True)
+    finally:
+        try:
+            channel.close()
+        except Exception:
+            pass
+
+
+def _scp_serve(channel, command, files):
+    """Handle a single SCP server-side exec on `channel`.
+
+    `command` is e.g. "scp -t /sftp/scp_upload.txt" (we receive a file
+    the client uploads) or "scp -f /sftp/scp_download.txt" (we send a
+    file the client downloads). `files` is the in-memory dict from
+    _InMemorySFTPServer so SCP and SFTP share the same backing store.
+
+    Returns the new contents of `files` (unchanged on -f, updated on -t).
+    """
+    import os.path as _op
+
+    def _recvn(n):
+        out = b""
+        while len(out) < n:
+            chunk = channel.recv(n - len(out))
+            if not chunk:
+                return out
+            out += chunk
+        return out
+
+    def _recvline():
+        out = b""
+        while True:
+            b = channel.recv(1)
+            if not b:
+                return out
+            out += b
+            if b == b"\n":
+                return out
+
+    # libssh2 sends e.g. `scp -pf '/path'` (combined flags + quoted path),
+    # not just `scp -f /path`. Parse via shlex to honor the quoting, then
+    # look at the flag bundle for `t` (receive) or `f` (send).
+    import shlex
+    try:
+        parts = shlex.split(command)
+    except ValueError:
+        return False
+    if len(parts) < 3 or parts[0] != "scp":
+        return False
+    flags, path = parts[1], parts[-1]
+    if not flags.startswith("-"):
+        return False
+    preserve_times = "p" in flags
+    if "t" in flags:
+        mode = "-t"
+    elif "f" in flags:
+        mode = "-f"
+    else:
+        return False
+
+    if mode == "-t":  # server receives
+        channel.send(b"\x00")  # ready
+        header = _recvline()
+        # Format: "C<octal-mode> <size> <basename>\n"
+        if not header.startswith(b"C"):
+            return False
+        try:
+            _modepart, sizepart, _name = header.rstrip(b"\n").decode().split(" ", 2)
+            size = int(sizepart)
+        except (ValueError, IndexError):
+            return False
+        channel.send(b"\x00")
+        data = _recvn(size)
+        if len(data) < size:
+            return False
+        # Persist before waiting for the trailing \0: the client may
+        # close the channel without sending one (libssh2's scp_send
+        # doesn't, after sending the final \0 byte through write).
+        files[path] = data
+        nul = _recvn(1)  # SCP end-of-data \0 — best effort
+        if nul == b"\x00":
+            channel.send(b"\x00")  # final ack
+        return True
+
+    if mode == "-f":  # server sends
+        ack = _recvn(1)
+        if ack != b"\x00":
+            return False
+        data = files.get(path, b"")
+        basename = _op.basename(path)
+        # When the client uses `-p` (libssh2's scp_recv2 with non-NULL
+        # sb), it expects a `T<mtime> 0 <atime> 0\n` time-info line
+        # first. We mostly call scp_recv2 with NULL sb so this branch
+        # is rarely taken, but support it for completeness.
+        if preserve_times:
+            channel.send(b"T1700000000 0 1700000000 0\n")
+            ack = _recvn(1)
+            if ack != b"\x00":
+                return False
+        header = f"C0644 {len(data)} {basename}\n".encode("ascii")
+        channel.send(header)
+        ack = _recvn(1)
+        if ack != b"\x00":
+            return False
+        channel.send(data)
+        channel.send(b"\x00")
+        # Don't wait for a final \0 ack from the client. libssh2's
+        # scp_recv2 doesn't send one after consuming data; waiting
+        # would deadlock with the client's "read until EOF" loop.
+        return True
+
+    return False
 
 
 class _InMemorySFTPServer(paramiko.SFTPServerInterface):
@@ -208,9 +349,12 @@ def serve_one(port: int, host_key_path: Path, max_seconds: float) -> int:
     host_key = paramiko.Ed25519Key(filename=str(host_key_path))
 
     # Seed an SFTP file the rig client will fetch + verify, and pre-
-    # create the path the client will upload to.
+    # create the path the client will upload to. The SCP rig shares the
+    # same dict.
     _InMemorySFTPServer.files["/sftp/download.txt"] = b"SFTP_RIG_OK_DL\n"
     _InMemorySFTPServer.files["/sftp/upload.txt"] = b""
+    _InMemorySFTPServer.files["/scp/download.txt"] = b"SCP_RIG_OK_DL\n"
+    _InMemorySFTPServer.files["/scp/upload.txt"] = b""
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -232,7 +376,7 @@ def serve_one(port: int, host_key_path: Path, max_seconds: float) -> int:
     # behind the "sftp" channel-subsystem request.
     transport.set_subsystem_handler("sftp", paramiko.SFTPServer,
                                      _InMemorySFTPServer)
-    server = Server()
+    server = Server(_InMemorySFTPServer.files)
     try:
         transport.start_server(server=server)
     except paramiko.SSHException as e:
@@ -240,30 +384,13 @@ def serve_one(port: int, host_key_path: Path, max_seconds: float) -> int:
         return 2
     print(f"[ssh-server] handshake ok; cipher={transport.local_cipher}", flush=True)
 
-    channel = transport.accept(timeout=max_seconds)
-    if channel is None:
-        print("[ssh-server] no channel opened", flush=True)
-        return 3
-    print("[ssh-server] channel opened", flush=True)
-
-    # Wait briefly for an exec request. SFTP-only tests won't fire
-    # an exec — let those proceed to the accept() below.
-    if server.event.wait(timeout=2.0):
-        print(f"[ssh-server] exec command: {server.command!r}", flush=True)
-        channel.sendall(b"SSH_RIG_OK\n")
-        channel.send_exit_status(0)
-        channel.close()
-        print("[ssh-server] sent exec marker", flush=True)
-    else:
-        print("[ssh-server] no exec request; skipping marker", flush=True)
-
-    # Keep the transport alive until the client disconnects (or the
-    # rig hits its own outer timeout). SFTP is wired via
-    # set_subsystem_handler and runs in a background thread spawned
-    # by paramiko's transport — we don't need to accept() a new
-    # channel here. Polling transport.is_active() avoids tearing the
-    # connection down while the client is mid-SFTP.
-    while transport.is_active():
+    # Exec channels (plain + SCP) are dispatched per-channel by
+    # check_channel_exec_request → daemon thread. SFTP runs in
+    # paramiko's subsystem-handler thread. So here we just keep
+    # the transport alive until the client disconnects (or the rig's
+    # outer timeout fires).
+    deadline = time.time() + max_seconds
+    while transport.is_active() and time.time() < deadline:
         time.sleep(0.5)
     print("[ssh-server] transport closed; "
           f"sftp files seen: {sorted(_InMemorySFTPServer.files.items())}",
