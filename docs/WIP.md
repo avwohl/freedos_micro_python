@@ -211,6 +211,19 @@ the test passed.
    file via MicroPython `open()` and calls the existing
    `userauth_publickey(user, privkey_bytes)`.
 
+4. **Document where SSH credentials live on DOS.** There's no
+   `~/.ssh/` on DOS, so the conventions need to be spelled out:
+   where MP looks for `id_ed25519` / `known_hosts` /
+   `authorized_keys` (likely a single `\SSH\` dir at the root
+   of whatever drive the user runs from? or current-dir
+   fallback?), how to point `examples/sftp.py` /
+   `examples/scp.py` at a non-default location, and the 8.3
+   filename mapping (e.g. `id_ed25519` won't fit — pick
+   `ID_ED.KEY` or similar and document it). Also: pubkey-auth
+   from a file currently can't be loaded at runtime (see #2/#3
+   above), so document the build-time inlining pattern as the
+   interim recipe until that's fixed.
+
 4. **Expose POSIX TCP_NODELAY in modlwip.** modlwip's `case
    TCP_NODELAY:` switch matches on the lwIP `TF_NODELAY = 0x40`
    constant, not POSIX `TCP_NODELAY = 1`. Currently nobody needs

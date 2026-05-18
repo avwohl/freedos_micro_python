@@ -288,6 +288,15 @@ patch_main_pktdrv_prealloc() {
             print "    }"
             print "}"
             print ""
+            print "// Resolve the INT 21h thunk's linear address + write the"
+            print "// `CD 21 CB` opcode bytes there NOW, while the stack is"
+            print "// shallow. Mirrors `_preallocate_bounce_buffer`'\''s rationale:"
+            print "// PMODE/W'\''s DPMI lookup paths have shown deep-stack"
+            print "// sensitivities, and the equivalent work used to run"
+            print "// lazy-on-first-`open()` deep inside the MicroPython"
+            print "// interpreter stack. Defined in port/dosint21_uc386dos.c."
+            print "extern void dos_int21_thunk_preinit(void);"
+            print ""
             inserted = 1
             in_main = 1
             print
@@ -302,6 +311,10 @@ patch_main_pktdrv_prealloc() {
             print "    // Pre-allocate the pktdrv bounce buffer NOW, while the stack is"
             print "    // shallow. PMODE/W'\''s AH=0x48 hangs from deep stacks."
             print "    _preallocate_bounce_buffer();"
+            print "    // Same idea for the INT 21h thunk: resolve its linear"
+            print "    // address + write the opcode bytes now, not lazily on"
+            print "    // the first open()."
+            print "    dos_int21_thunk_preinit();"
             in_main = 0
             next
         }

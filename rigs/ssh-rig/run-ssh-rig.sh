@@ -81,10 +81,11 @@ mcopy -i "$TEST_IMG" -o "$NE2000_COM"  ::NE2000.COM
 # Inline the ed25519 private key bytes into SSHTEST.PY at the
 # __CLIENT_KEY_BYTES__ placeholder, then use the rendered file for
 # both the paste-mode COM1 stream and the floppy copy. We avoid
-# calling `open('CLIENT.KEY')` from inside the test because — for
-# reasons not yet pinned down — DOS INT 21h AH=3D wedges in the
-# DPMI 0x0301 thunk when invoked from a paste-mode REPL after
-# `import _ssh`. Embedding the bytes side-steps it entirely.
+# calling `open('CLIENT.KEY')` from inside the test because DPMI
+# 0x0301 on PMODE/W wedges from any non-shallow PM stack — even a
+# single Python function frame is enough — so `open()` reliably
+# hangs once the script has done meaningful work. See
+# port/dosint21_uc386dos.c::dos_int21_thunk_preinit comment.
 SSHTEST_RENDERED="$(pwd)/sshtest-rendered.py"
 python3 - "$CLIENT_KEY" ./SSHTEST.PY "$SSHTEST_RENDERED" <<'PYEOF'
 import sys

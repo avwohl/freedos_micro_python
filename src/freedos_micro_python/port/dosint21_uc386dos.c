@@ -141,6 +141,19 @@ static int dos_int21_thunk_init(void) {
     return 0;
 }
 
+// Pre-init entry called from main() at shallow stack. The DPMI
+// 0x0002/0x0006 + thunk-memory write used to run lazily inside the
+// first `open()` call, deep inside the MicroPython interpreter
+// stack. Empirically that combination wedges in PMODE/W's DPMI
+// dispatch when the stack is deep enough (the same family of
+// deep-stack sensitivities documented on `_preallocate_bounce_buffer`).
+// Running it once at program entry, before MP builds up its stack,
+// keeps every subsequent `dos_int21_call` to just the DPMI 0x0301
+// real-mode-call gate, which is stack-depth-safe.
+void dos_int21_thunk_preinit(void) {
+    (void)dos_int21_thunk_init();
+}
+
 // Dispatch an INT 21h with the caller-supplied rmcs. CS:IP is forced
 // to our thunk; SS:SP=0:0 → DPMI picks a real-mode stack from its
 // own pool. On return, rm.flags has the real-mode FLAGS register
