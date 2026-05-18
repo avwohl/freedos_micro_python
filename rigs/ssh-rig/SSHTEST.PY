@@ -56,6 +56,7 @@ exec_pass = b'SSH_RIG_OK' in out
 # SFTP round-trip on the same SSH session: download a seeded file
 # then upload a marker the server can verify.
 sftp_pass = False
+sftp_fsops_pass = False
 try:
     sftp = sess.sftp()
     print('SSHTEST: sftp_opened')
@@ -69,6 +70,37 @@ try:
         f.close()
         print('SSHTEST: sftp_ul_len=' + str(n))
         sftp_pass = (n == 15)
+
+    # FS-ops smoke: realpath → opendir → stat → mkdir → rename → unlink → rmdir.
+    # Each method touches a different wrapper in modssh_uc386dos.c.
+    try:
+        rp = sftp.realpath('/sftp')
+        print('SSHTEST: sftp_realpath=' + rp)
+
+        d = sftp.opendir('/sftp')
+        names = []
+        while True:
+            e = d.read()
+            if e is None:
+                break
+            names.append(e[0])
+        d.close()
+        print('SSHTEST: sftp_ls=' + ','.join(sorted(names)))
+
+        st = sftp.stat('/sftp/download.txt')
+        print('SSHTEST: sftp_stat_size=' + str(st[1]))
+
+        sftp.mkdir('/sftp/newdir', 0o755)
+        sftp.rename('/sftp/scratch.txt', '/sftp/renamed.txt')
+        sftp.unlink('/sftp/renamed.txt')
+        sftp.rmdir('/sftp/newdir')
+        print('SSHTEST: sftp_fsops_ok')
+        sftp_fsops_pass = (rp == '/sftp'
+                            and 'download.txt' in names
+                            and st[1] == len(dl))
+    except OSError as e:
+        print('SSHTEST: sftp_fsops_failed', e)
+
     sftp.close()
 except OSError as e:
     print('SSHTEST: sftp_failed', e)
@@ -86,7 +118,7 @@ try:
 except OSError as e:
     print('SSHTEST: scp_failed', e)
 
-if exec_pass and sftp_pass and scp_pass:
+if exec_pass and sftp_pass and sftp_fsops_pass and scp_pass:
     # Leading \n so the rig's `grep -qE '^SSHTEST: PASS\r?$'` matches
     # even when the line gets prefixed by diagnostic markers from
     # the libssh2/lwIP/axtls code (e.g. [hu:...]).
@@ -94,5 +126,6 @@ if exec_pass and sftp_pass and scp_pass:
 else:
     sys.stdout.write('\nSSHTEST: FAIL_unexpected_response exec=' + str(exec_pass)
                      + ' sftp=' + str(sftp_pass)
+                     + ' sftp_fsops=' + str(sftp_fsops_pass)
                      + ' scp=' + str(scp_pass) + '\n')
 sess.close()

@@ -443,9 +443,204 @@ static mp_obj_t ssh_sftp_close(mp_obj_t self_in) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_1(ssh_sftp_close_obj, ssh_sftp_close);
 
+/* ---------- SFTPDir (directory handle, returned by SFTP.opendir) ---------- */
+typedef struct _mp_obj_ssh_sftp_dir_t {
+    mp_obj_base_t base;
+    LIBSSH2_SFTP_HANDLE *handle;
+    mp_obj_t sftp;
+} mp_obj_ssh_sftp_dir_t;
+static const mp_obj_type_t ssh_sftp_dir_type;
+
+static mp_obj_t _attrs_to_tuple(const LIBSSH2_SFTP_ATTRIBUTES *a) {
+    /* (mode, size, atime, mtime, uid, gid) — fields not present in
+     * attrs->flags read as 0. */
+    mp_obj_t t[6];
+    t[0] = mp_obj_new_int((a->flags & LIBSSH2_SFTP_ATTR_PERMISSIONS)
+                           ? (mp_int_t)a->permissions : 0);
+    t[1] = mp_obj_new_int_from_ull((a->flags & LIBSSH2_SFTP_ATTR_SIZE)
+                                    ? a->filesize : 0);
+    t[2] = mp_obj_new_int((a->flags & LIBSSH2_SFTP_ATTR_ACMODTIME)
+                           ? (mp_int_t)a->atime : 0);
+    t[3] = mp_obj_new_int((a->flags & LIBSSH2_SFTP_ATTR_ACMODTIME)
+                           ? (mp_int_t)a->mtime : 0);
+    t[4] = mp_obj_new_int((a->flags & LIBSSH2_SFTP_ATTR_UIDGID)
+                           ? (mp_int_t)a->uid : 0);
+    t[5] = mp_obj_new_int((a->flags & LIBSSH2_SFTP_ATTR_UIDGID)
+                           ? (mp_int_t)a->gid : 0);
+    return mp_obj_new_tuple(6, t);
+}
+
+static mp_obj_t ssh_sftp_dir_read(mp_obj_t self_in) {
+    mp_obj_ssh_sftp_dir_t *self = MP_OBJ_TO_PTR(self_in);
+    if (self->handle == NULL) {
+        mp_raise_OSError(MP_EBADF);
+    }
+    char name[256];
+    LIBSSH2_SFTP_ATTRIBUTES attrs;
+    int rc = libssh2_sftp_readdir(self->handle, name, sizeof(name), &attrs);
+    if (rc == 0) {
+        return mp_const_none;  /* end of directory */
+    }
+    if (rc < 0) {
+        mp_obj_ssh_sftp_t *sftp = MP_OBJ_TO_PTR(self->sftp);
+        mp_obj_ssh_session_t *sess = MP_OBJ_TO_PTR(sftp->session);
+        _ssh_raise_session_error(sess->session, rc, "sftp_readdir");
+    }
+    mp_obj_t pair[2];
+    pair[0] = mp_obj_new_str(name, (size_t)rc);
+    pair[1] = _attrs_to_tuple(&attrs);
+    return mp_obj_new_tuple(2, pair);
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(ssh_sftp_dir_read_obj, ssh_sftp_dir_read);
+
+static mp_obj_t ssh_sftp_dir_close(mp_obj_t self_in) {
+    mp_obj_ssh_sftp_dir_t *self = MP_OBJ_TO_PTR(self_in);
+    if (self->handle != NULL) {
+        libssh2_sftp_closedir(self->handle);
+        self->handle = NULL;
+    }
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(ssh_sftp_dir_close_obj, ssh_sftp_dir_close);
+
+static const mp_rom_map_elem_t ssh_sftp_dir_locals_dict_table[] = {
+    { MP_ROM_QSTR(MP_QSTR_read),  MP_ROM_PTR(&ssh_sftp_dir_read_obj) },
+    { MP_ROM_QSTR(MP_QSTR_close), MP_ROM_PTR(&ssh_sftp_dir_close_obj) },
+};
+static MP_DEFINE_CONST_DICT(ssh_sftp_dir_locals_dict,
+                             ssh_sftp_dir_locals_dict_table);
+
+MP_DEFINE_CONST_OBJ_TYPE(
+    ssh_sftp_dir_type,
+    MP_QSTR_SFTPDir,
+    MP_TYPE_FLAG_NONE,
+    locals_dict, &ssh_sftp_dir_locals_dict
+);
+
+/* ---------- SFTP filesystem-op methods ---------- */
+
+static mp_obj_t ssh_sftp_opendir(mp_obj_t self_in, mp_obj_t path_in) {
+    mp_obj_ssh_sftp_t *self = MP_OBJ_TO_PTR(self_in);
+    if (self->sftp == NULL) {
+        mp_raise_OSError(MP_EBADF);
+    }
+    const char *path = mp_obj_str_get_str(path_in);
+    LIBSSH2_SFTP_HANDLE *h = libssh2_sftp_opendir(self->sftp, path);
+    if (h == NULL) {
+        mp_obj_ssh_session_t *sess = MP_OBJ_TO_PTR(self->session);
+        _ssh_raise_session_error(sess->session, -1, "sftp_opendir");
+    }
+    mp_obj_ssh_sftp_dir_t *d = mp_obj_malloc(mp_obj_ssh_sftp_dir_t,
+                                              &ssh_sftp_dir_type);
+    d->handle = h;
+    d->sftp = self_in;
+    return MP_OBJ_FROM_PTR(d);
+}
+static MP_DEFINE_CONST_FUN_OBJ_2(ssh_sftp_opendir_obj, ssh_sftp_opendir);
+
+static mp_obj_t ssh_sftp_mkdir(size_t n_args, const mp_obj_t *args) {
+    mp_obj_ssh_sftp_t *self = MP_OBJ_TO_PTR(args[0]);
+    if (self->sftp == NULL) {
+        mp_raise_OSError(MP_EBADF);
+    }
+    const char *path = mp_obj_str_get_str(args[1]);
+    long mode = (n_args == 3) ? mp_obj_get_int(args[2]) : 0755;
+    int rc = libssh2_sftp_mkdir(self->sftp, path, mode);
+    if (rc != 0) {
+        mp_obj_ssh_session_t *sess = MP_OBJ_TO_PTR(self->session);
+        _ssh_raise_session_error(sess->session, rc, "sftp_mkdir");
+    }
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(ssh_sftp_mkdir_obj, 2, 3,
+                                             ssh_sftp_mkdir);
+
+static mp_obj_t ssh_sftp_rmdir(mp_obj_t self_in, mp_obj_t path_in) {
+    mp_obj_ssh_sftp_t *self = MP_OBJ_TO_PTR(self_in);
+    if (self->sftp == NULL) {
+        mp_raise_OSError(MP_EBADF);
+    }
+    int rc = libssh2_sftp_rmdir(self->sftp, mp_obj_str_get_str(path_in));
+    if (rc != 0) {
+        mp_obj_ssh_session_t *sess = MP_OBJ_TO_PTR(self->session);
+        _ssh_raise_session_error(sess->session, rc, "sftp_rmdir");
+    }
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_2(ssh_sftp_rmdir_obj, ssh_sftp_rmdir);
+
+static mp_obj_t ssh_sftp_unlink(mp_obj_t self_in, mp_obj_t path_in) {
+    mp_obj_ssh_sftp_t *self = MP_OBJ_TO_PTR(self_in);
+    if (self->sftp == NULL) {
+        mp_raise_OSError(MP_EBADF);
+    }
+    int rc = libssh2_sftp_unlink(self->sftp, mp_obj_str_get_str(path_in));
+    if (rc != 0) {
+        mp_obj_ssh_session_t *sess = MP_OBJ_TO_PTR(self->session);
+        _ssh_raise_session_error(sess->session, rc, "sftp_unlink");
+    }
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_2(ssh_sftp_unlink_obj, ssh_sftp_unlink);
+
+static mp_obj_t ssh_sftp_rename(mp_obj_t self_in, mp_obj_t old_in,
+                                  mp_obj_t new_in) {
+    mp_obj_ssh_sftp_t *self = MP_OBJ_TO_PTR(self_in);
+    if (self->sftp == NULL) {
+        mp_raise_OSError(MP_EBADF);
+    }
+    const char *old_path = mp_obj_str_get_str(old_in);
+    const char *new_path = mp_obj_str_get_str(new_in);
+    int rc = libssh2_sftp_rename(self->sftp, old_path, new_path);
+    if (rc != 0) {
+        mp_obj_ssh_session_t *sess = MP_OBJ_TO_PTR(self->session);
+        _ssh_raise_session_error(sess->session, rc, "sftp_rename");
+    }
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_3(ssh_sftp_rename_obj, ssh_sftp_rename);
+
+static mp_obj_t ssh_sftp_stat(mp_obj_t self_in, mp_obj_t path_in) {
+    mp_obj_ssh_sftp_t *self = MP_OBJ_TO_PTR(self_in);
+    if (self->sftp == NULL) {
+        mp_raise_OSError(MP_EBADF);
+    }
+    LIBSSH2_SFTP_ATTRIBUTES attrs;
+    int rc = libssh2_sftp_stat(self->sftp, mp_obj_str_get_str(path_in), &attrs);
+    if (rc != 0) {
+        mp_obj_ssh_session_t *sess = MP_OBJ_TO_PTR(self->session);
+        _ssh_raise_session_error(sess->session, rc, "sftp_stat");
+    }
+    return _attrs_to_tuple(&attrs);
+}
+static MP_DEFINE_CONST_FUN_OBJ_2(ssh_sftp_stat_obj, ssh_sftp_stat);
+
+static mp_obj_t ssh_sftp_realpath(mp_obj_t self_in, mp_obj_t path_in) {
+    mp_obj_ssh_sftp_t *self = MP_OBJ_TO_PTR(self_in);
+    if (self->sftp == NULL) {
+        mp_raise_OSError(MP_EBADF);
+    }
+    char target[512];
+    int rc = libssh2_sftp_realpath(self->sftp, mp_obj_str_get_str(path_in),
+                                     target, sizeof(target));
+    if (rc < 0) {
+        mp_obj_ssh_session_t *sess = MP_OBJ_TO_PTR(self->session);
+        _ssh_raise_session_error(sess->session, rc, "sftp_realpath");
+    }
+    return mp_obj_new_str(target, (size_t)rc);
+}
+static MP_DEFINE_CONST_FUN_OBJ_2(ssh_sftp_realpath_obj, ssh_sftp_realpath);
+
 static const mp_rom_map_elem_t ssh_sftp_locals_dict_table[] = {
-    { MP_ROM_QSTR(MP_QSTR_open),  MP_ROM_PTR(&ssh_sftp_open_obj) },
-    { MP_ROM_QSTR(MP_QSTR_close), MP_ROM_PTR(&ssh_sftp_close_obj) },
+    { MP_ROM_QSTR(MP_QSTR_open),     MP_ROM_PTR(&ssh_sftp_open_obj) },
+    { MP_ROM_QSTR(MP_QSTR_opendir),  MP_ROM_PTR(&ssh_sftp_opendir_obj) },
+    { MP_ROM_QSTR(MP_QSTR_mkdir),    MP_ROM_PTR(&ssh_sftp_mkdir_obj) },
+    { MP_ROM_QSTR(MP_QSTR_rmdir),    MP_ROM_PTR(&ssh_sftp_rmdir_obj) },
+    { MP_ROM_QSTR(MP_QSTR_unlink),   MP_ROM_PTR(&ssh_sftp_unlink_obj) },
+    { MP_ROM_QSTR(MP_QSTR_rename),   MP_ROM_PTR(&ssh_sftp_rename_obj) },
+    { MP_ROM_QSTR(MP_QSTR_stat),     MP_ROM_PTR(&ssh_sftp_stat_obj) },
+    { MP_ROM_QSTR(MP_QSTR_realpath), MP_ROM_PTR(&ssh_sftp_realpath_obj) },
+    { MP_ROM_QSTR(MP_QSTR_close),    MP_ROM_PTR(&ssh_sftp_close_obj) },
 };
 static MP_DEFINE_CONST_DICT(ssh_sftp_locals_dict,
                              ssh_sftp_locals_dict_table);

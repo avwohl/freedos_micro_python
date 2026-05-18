@@ -301,10 +301,13 @@ def _scp_serve(channel, command, files):
 
 class _InMemorySFTPServer(paramiko.SFTPServerInterface):
     """In-RAM SFTP backend so the rig has full control over what the
-    client reads / writes. `files` is a {path: bytes} dict the rig
-    seeds before the client connects, and the rig inspects after."""
+    client reads / writes. `files` is a {path: bytes} dict (None value
+    marks a directory) the rig seeds before the client connects and
+    inspects after. Path model is flat-with-/ — `/sftp/x.txt` lives
+    under directory `/sftp`."""
 
     files = {}  # populated by serve_one() before transport.start_server
+    dirs = set()  # known directory paths, e.g. {"/", "/sftp", "/scp"}
 
     def open(self, path, flags, attr):
         import os as _os
@@ -321,6 +324,95 @@ class _InMemorySFTPServer(paramiko.SFTPServerInterface):
         h = paramiko.SFTPHandle(flags)
         h._rig_path = path
         return h
+
+    def _is_dir(self, path):
+        if path in _InMemorySFTPServer.dirs:
+            return True
+        prefix = path.rstrip("/") + "/"
+        for f in _InMemorySFTPServer.files:
+            if f.startswith(prefix):
+                return True
+        return False
+
+    def _attrs_for(self, path, data=None):
+        a = paramiko.SFTPAttributes()
+        if self._is_dir(path):
+            a.st_mode = 0o040755
+            a.st_size = 0
+        else:
+            a.st_mode = 0o100644
+            a.st_size = len(data if data is not None
+                            else _InMemorySFTPServer.files.get(path, b""))
+        a.st_uid = 0
+        a.st_gid = 0
+        a.st_atime = 0
+        a.st_mtime = 0
+        return a
+
+    def stat(self, path):
+        if path in _InMemorySFTPServer.files:
+            return self._attrs_for(path)
+        if self._is_dir(path):
+            return self._attrs_for(path)
+        return paramiko.SFTP_NO_SUCH_FILE
+
+    def lstat(self, path):
+        return self.stat(path)
+
+    def list_folder(self, path):
+        if not self._is_dir(path):
+            return paramiko.SFTP_NO_SUCH_FILE
+        prefix = path.rstrip("/") + "/"
+        out = []
+        seen = set()
+        for f, data in _InMemorySFTPServer.files.items():
+            if not f.startswith(prefix):
+                continue
+            tail = f[len(prefix):]
+            if "/" in tail:
+                # Subdirectory entry — emit the segment once.
+                name = tail.split("/", 1)[0]
+                if name in seen:
+                    continue
+                seen.add(name)
+                a = paramiko.SFTPAttributes()
+                a.st_mode = 0o040755
+                a.st_size = 0
+                a.filename = name
+            else:
+                if tail in seen:
+                    continue
+                seen.add(tail)
+                a = self._attrs_for(f, data)
+                a.filename = tail
+            out.append(a)
+        return out
+
+    def mkdir(self, path, attr):
+        _InMemorySFTPServer.dirs.add(path.rstrip("/") or "/")
+        return paramiko.SFTP_OK
+
+    def rmdir(self, path):
+        p = path.rstrip("/") or "/"
+        _InMemorySFTPServer.dirs.discard(p)
+        return paramiko.SFTP_OK
+
+    def remove(self, path):
+        if path in _InMemorySFTPServer.files:
+            del _InMemorySFTPServer.files[path]
+            return paramiko.SFTP_OK
+        return paramiko.SFTP_NO_SUCH_FILE
+
+    def rename(self, oldpath, newpath):
+        if oldpath in _InMemorySFTPServer.files:
+            _InMemorySFTPServer.files[newpath] = \
+                _InMemorySFTPServer.files.pop(oldpath)
+            return paramiko.SFTP_OK
+        if oldpath in _InMemorySFTPServer.dirs:
+            _InMemorySFTPServer.dirs.discard(oldpath)
+            _InMemorySFTPServer.dirs.add(newpath)
+            return paramiko.SFTP_OK
+        return paramiko.SFTP_NO_SUCH_FILE
 
 
 def _sftp_handle_read(self, offset, length):
@@ -355,6 +447,9 @@ def serve_one(port: int, host_key_path: Path, max_seconds: float) -> int:
     _InMemorySFTPServer.files["/sftp/upload.txt"] = b""
     _InMemorySFTPServer.files["/scp/download.txt"] = b"SCP_RIG_OK_DL\n"
     _InMemorySFTPServer.files["/scp/upload.txt"] = b""
+    # Seed an entry the FS-ops slice of SSHTEST.PY can rename/unlink.
+    _InMemorySFTPServer.files["/sftp/scratch.txt"] = b"scratch\n"
+    _InMemorySFTPServer.dirs.update({"/", "/sftp", "/scp"})
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
