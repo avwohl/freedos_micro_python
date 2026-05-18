@@ -8,6 +8,10 @@
  *     socket via libssh2's RECV/SEND callbacks routed to MP's
  *     stream protocol.
  *   - session.userauth_password(user, password)
+ *   - session.userauth_publickey(user, privkey_bytes[, pubkey_bytes,
+ *                                  passphrase]) — Ed25519 only;
+ *     privkey/pubkey are the in-memory contents of OpenSSH-format
+ *     keyfiles (e.g. id_ed25519 / id_ed25519.pub).
  *   - session.exec(command) — opens a channel, exec's the command,
  *     drains stdout, closes; returns the captured bytes.
  *   - session.close()
@@ -239,6 +243,60 @@ static mp_obj_t ssh_session_userauth_password(mp_obj_t self_in,
 }
 static MP_DEFINE_CONST_FUN_OBJ_3(ssh_session_userauth_password_obj,
                                   ssh_session_userauth_password);
+
+/* session.userauth_publickey(user, privkey_bytes[, pubkey_bytes_or_None
+ *                                                , passphrase_or_None])
+ *
+ * Wraps libssh2_userauth_publickey_frommemory. The private key must
+ * be an unencrypted (or passphrase-protected) OpenSSH-format Ed25519
+ * key — i.e. the contents of an `id_ed25519` file. `pubkey_bytes`
+ * is optional; when absent (or None), libssh2 derives the public key
+ * from the private key via our `_libssh2_axtls_pub_priv_keyfilememory`
+ * impl. RSA / ECDSA aren't wired in the axtls backend yet, so the
+ * call only succeeds with ed25519 keys.
+ *
+ * The file-based form (libssh2_userauth_publickey_fromfile) isn't
+ * exposed — uc386's libc has no fopen wired into libssh2; user code
+ * reads the keyfile with MicroPython's `open()` and passes bytes. */
+static mp_obj_t ssh_session_userauth_publickey(size_t n_args,
+                                                 const mp_obj_t *args) {
+    mp_obj_ssh_session_t *self = MP_OBJ_TO_PTR(args[0]);
+    if (self->session == NULL) {
+        mp_raise_OSError(MP_EBADF);
+    }
+    size_t user_len, priv_len, pub_len = 0, pass_len = 0;
+    const char *user = mp_obj_str_get_data(args[1], &user_len);
+    mp_buffer_info_t priv_buf, pub_buf;
+    mp_get_buffer_raise(args[2], &priv_buf, MP_BUFFER_READ);
+    const char *priv = (const char *)priv_buf.buf;
+    priv_len = priv_buf.len;
+
+    const char *pub = NULL;
+    if (n_args >= 4 && args[3] != mp_const_none) {
+        mp_get_buffer_raise(args[3], &pub_buf, MP_BUFFER_READ);
+        pub = (const char *)pub_buf.buf;
+        pub_len = pub_buf.len;
+    }
+    const char *pass = NULL;
+    if (n_args >= 5 && args[4] != mp_const_none) {
+        pass = mp_obj_str_get_data(args[4], &pass_len);
+    }
+    (void)pass_len;
+
+    int r = libssh2_userauth_publickey_frommemory(self->session,
+                                                    user, user_len,
+                                                    pub, pub_len,
+                                                    priv, priv_len,
+                                                    pass);
+    if (r != 0) {
+        _ssh_raise_session_error(self->session, r, "userauth_publickey");
+    }
+    self->authenticated = true;
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(ssh_session_userauth_publickey_obj,
+                                             3, 5,
+                                             ssh_session_userauth_publickey);
 
 /* session.exec(command) — open a fresh channel, exec the command,
  * drain stdout until EOF, close. Returns the captured bytes.
@@ -812,6 +870,8 @@ static MP_DEFINE_CONST_FUN_OBJ_1(ssh_session_close_obj, ssh_session_close);
 static const mp_rom_map_elem_t ssh_session_locals_dict_table[] = {
     { MP_ROM_QSTR(MP_QSTR_userauth_password),
         MP_ROM_PTR(&ssh_session_userauth_password_obj) },
+    { MP_ROM_QSTR(MP_QSTR_userauth_publickey),
+        MP_ROM_PTR(&ssh_session_userauth_publickey_obj) },
     { MP_ROM_QSTR(MP_QSTR_exec),  MP_ROM_PTR(&ssh_session_exec_obj) },
     { MP_ROM_QSTR(MP_QSTR_sftp),  MP_ROM_PTR(&ssh_session_sftp_obj) },
     { MP_ROM_QSTR(MP_QSTR_scp_recv), MP_ROM_PTR(&ssh_session_scp_recv_obj) },

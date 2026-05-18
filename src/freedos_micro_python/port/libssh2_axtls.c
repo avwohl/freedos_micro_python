@@ -2,9 +2,13 @@
  * the uc386-dos port. Pairs with libssh2_axtls.h.
  *
  * Status: SKELETON. Hashes (SHA1/256/384/512, MD5) and HMAC + AES
- * are wired to axtls; Curve25519 KEX and Ed25519 sign/verify are
- * wired to TweetNaCl. RSA, key-file parsing, and DH are stubbed
- * (return error) — those are the next slice of work.
+ * are wired to axtls; Curve25519 KEX and Ed25519 sign/verify/load
+ * are wired to TweetNaCl + libssh2's OpenSSH PEM helpers (so client-
+ * side ed25519 publickey auth works from an in-memory key blob).
+ * RSA and DH are stubbed (return error) — those are the next slice
+ * of work, alongside the file-based key load variants (uc386's libc
+ * has no fopen, so user code is expected to read the keyfile via
+ * MicroPython's `open()` and pass bytes to `userauth_publickey`).
  *
  * Build define: -DLIBSSH2_AXTLS=1 (selects this backend in
  * upstream/lib/libssh2/src/crypto.h via fetch.sh's patch).
@@ -529,17 +533,70 @@ int _libssh2_axtls_ed25519_verify(libssh2_ed25519_ctx *ctx,
     return (r == 0) ? 0 : -1;
 }
 
-/* Ed25519 signing stubs. We're an SSH client and never present an
- * Ed25519 user identity — host-key verify (above) is the only side
- * we exercise. libssh2's hostkey.c still references the sign /
- * load-private symbols even for client builds; provide stubs that
- * fail cleanly. */
+/* Ed25519 client-identity path: load an OpenSSH-format private key
+ * from memory and sign auth-request blobs with TweetNaCl. The
+ * private-key file format is the unencrypted "openssh-key-v1" PEM
+ * wrap; libssh2's own pem.c handles the PEM/base64 outer layers and
+ * the kdfname/ciphername/numkeys metadata, leaving us a
+ * string_buf positioned at the per-key payload (keytype, then
+ * pub_key, then priv_key, then comment, then padding).
+ *
+ * The file variants stay as stubs — uc386's libc has no fopen; user
+ * code reads the file with MicroPython's `open()` and passes the
+ * bytes through `session.userauth_publickey`. libssh2's
+ * `_userauth_publickey_frommemory` path uses these `*memory` entry
+ * points and never touches the file ones. */
+
+/* Walk past the openssh-key-v1 metadata into the per-key payload and
+ * extract raw 32-byte pub + 64-byte priv (seed||pub). Returns the
+ * decrypted string_buf so callers can free it; pub/priv point into
+ * its buffer. */
+static int _axtls_ed25519_parse_priv(LIBSSH2_SESSION *session,
+                                       const char *filedata,
+                                       size_t filedata_len,
+                                       const unsigned char *passphrase,
+                                       struct string_buf **out_decrypted,
+                                       unsigned char **out_pub,
+                                       unsigned char **out_priv) {
+    struct string_buf *decrypted = NULL;
+    int rc = _libssh2_openssh_pem_parse_memory(session, passphrase,
+                                                 filedata, filedata_len,
+                                                 &decrypted);
+    if (rc) {
+        return rc;
+    }
+    unsigned char *kt = NULL, *pub = NULL, *priv = NULL;
+    size_t kt_len = 0, pub_len = 0, priv_len = 0;
+    if (_libssh2_get_string(decrypted, &kt, &kt_len) || !kt ||
+        kt_len != 11 || memcmp(kt, "ssh-ed25519", 11) != 0) {
+        _libssh2_string_buf_free(session, decrypted);
+        return _libssh2_error(session, LIBSSH2_ERROR_PROTO,
+                                "ed25519 private key: unexpected keytype");
+    }
+    if (_libssh2_get_string(decrypted, &pub, &pub_len) ||
+        pub_len != LIBSSH2_ED25519_KEY_LEN) {
+        _libssh2_string_buf_free(session, decrypted);
+        return _libssh2_error(session, LIBSSH2_ERROR_PROTO,
+                                "ed25519 private key: bad pub length");
+    }
+    if (_libssh2_get_string(decrypted, &priv, &priv_len) ||
+        priv_len != LIBSSH2_ED25519_PRIVATE_KEY_LEN) {
+        _libssh2_string_buf_free(session, decrypted);
+        return _libssh2_error(session, LIBSSH2_ERROR_PROTO,
+                                "ed25519 private key: bad priv length");
+    }
+    *out_decrypted = decrypted;
+    *out_pub = pub;
+    *out_priv = priv;
+    return 0;
+}
+
 int _libssh2_axtls_ed25519_new_private(libssh2_ed25519_ctx **ed_ctx,
                                          struct _LIBSSH2_SESSION *session,
                                          const char *filename,
                                          const uint8_t *passphrase) {
     (void)ed_ctx; (void)session; (void)filename; (void)passphrase;
-    return -1;
+    return -1;  /* DOS file I/O — load via Python and use _frommemory. */
 }
 
 int _libssh2_axtls_ed25519_new_private_frommemory(
@@ -547,17 +604,53 @@ int _libssh2_axtls_ed25519_new_private_frommemory(
         struct _LIBSSH2_SESSION *session,
         const char *filedata, size_t filedata_len,
         unsigned const char *passphrase) {
-    (void)ed_ctx; (void)session; (void)filedata; (void)filedata_len; (void)passphrase;
-    return -1;
+    struct string_buf *decrypted = NULL;
+    unsigned char *pub = NULL, *priv = NULL;
+    int rc = _axtls_ed25519_parse_priv(session, filedata, filedata_len,
+                                         passphrase, &decrypted, &pub, &priv);
+    if (rc) return rc;
+    libssh2_ed25519_ctx *c =
+        (libssh2_ed25519_ctx *)LIBSSH2_CALLOC(session, sizeof(*c));
+    if (!c) {
+        _libssh2_string_buf_free(session, decrypted);
+        return -1;
+    }
+    memcpy(c->public_key, pub, LIBSSH2_ED25519_KEY_LEN);
+    memcpy(c->private_key, priv, LIBSSH2_ED25519_PRIVATE_KEY_LEN);
+    c->have_private = 1;
+    *ed_ctx = c;
+    _libssh2_string_buf_free(session, decrypted);
+    return 0;
 }
 
 int _libssh2_axtls_ed25519_sign(libssh2_ed25519_ctx *ctx,
                                   struct _LIBSSH2_SESSION *session,
                                   uint8_t **out_sig, size_t *out_sig_len,
                                   const uint8_t *message, size_t message_len) {
-    (void)ctx; (void)session; (void)out_sig; (void)out_sig_len;
-    (void)message; (void)message_len;
-    return -1;
+    if (!ctx || !ctx->have_private) {
+        return -1;
+    }
+    /* TweetNaCl's crypto_sign emits sig||message of length 64+m_len.
+     * We want just the leading 64-byte signature. */
+    unsigned long long sm_len = 0;
+    unsigned char *sm =
+        (unsigned char *)LIBSSH2_ALLOC(session, 64 + message_len);
+    if (!sm) return -1;
+    if (crypto_sign(sm, &sm_len, message, message_len, ctx->private_key) != 0
+        || sm_len < 64) {
+        LIBSSH2_FREE(session, sm);
+        return -1;
+    }
+    unsigned char *sig = (unsigned char *)LIBSSH2_ALLOC(session, 64);
+    if (!sig) {
+        LIBSSH2_FREE(session, sm);
+        return -1;
+    }
+    memcpy(sig, sm, 64);
+    LIBSSH2_FREE(session, sm);
+    *out_sig = sig;
+    *out_sig_len = 64;
+    return 0;
 }
 
 void _libssh2_axtls_ed25519_free(libssh2_ed25519_ctx *ctx) {
@@ -657,18 +750,57 @@ int _libssh2_axtls_pub_priv_keyfile(LIBSSH2_SESSION *session,
                                       const char *privatekey, const char *passphrase) {
     (void)session; (void)method; (void)method_len;
     (void)pubkeydata; (void)pubkeydata_len; (void)privatekey; (void)passphrase;
-    return -1;
+    return -1;  /* DOS file I/O — see comment on ed25519_new_private. */
 }
 
+/* Derive the wire-format SSH public key blob from an OpenSSH-format
+ * Ed25519 private key in memory. libssh2's
+ * `userauth_publickey_frommemory` calls this when the caller didn't
+ * supply a public key alongside the private. We emit:
+ *
+ *     u32(11) || "ssh-ed25519" || u32(32) || raw 32-byte pub_key
+ *
+ * which the upper layer wraps in the USERAUTH_REQUEST blob.
+ * Only ssh-ed25519 keys are supported; RSA/ECDSA stay unimplemented. */
 int _libssh2_axtls_pub_priv_keyfilememory(LIBSSH2_SESSION *session,
                                             unsigned char **method, size_t *method_len,
                                             unsigned char **pubkeydata, size_t *pubkeydata_len,
                                             const char *privatekeydata, size_t privatekeydata_len,
                                             const char *passphrase) {
-    (void)session; (void)method; (void)method_len;
-    (void)pubkeydata; (void)pubkeydata_len; (void)privatekeydata;
-    (void)privatekeydata_len; (void)passphrase;
-    return -1;
+    struct string_buf *decrypted = NULL;
+    unsigned char *pub = NULL, *priv = NULL;
+    int rc = _axtls_ed25519_parse_priv(session, privatekeydata,
+                                         privatekeydata_len,
+                                         (const unsigned char *)passphrase,
+                                         &decrypted, &pub, &priv);
+    if (rc) return rc;
+
+    /* method = "ssh-ed25519" (11 bytes). */
+    unsigned char *m = (unsigned char *)LIBSSH2_ALLOC(session, 11);
+    if (!m) {
+        _libssh2_string_buf_free(session, decrypted);
+        return -1;
+    }
+    memcpy(m, "ssh-ed25519", 11);
+
+    /* pubkey blob = u32(11)+"ssh-ed25519"+u32(32)+raw_pub. */
+    const size_t blob_len = 4 + 11 + 4 + LIBSSH2_ED25519_KEY_LEN;
+    unsigned char *blob = (unsigned char *)LIBSSH2_ALLOC(session, blob_len);
+    if (!blob) {
+        LIBSSH2_FREE(session, m);
+        _libssh2_string_buf_free(session, decrypted);
+        return -1;
+    }
+    unsigned char *p = blob;
+    _libssh2_store_str(&p, "ssh-ed25519", 11);
+    _libssh2_store_str(&p, (const char *)pub, LIBSSH2_ED25519_KEY_LEN);
+
+    *method = m;
+    *method_len = 11;
+    *pubkeydata = blob;
+    *pubkeydata_len = blob_len;
+    _libssh2_string_buf_free(session, decrypted);
+    return 0;
 }
 
 int _libssh2_axtls_sk_pub_keyfilememory(LIBSSH2_SESSION *session,
@@ -685,6 +817,32 @@ int _libssh2_axtls_sk_pub_keyfilememory(LIBSSH2_SESSION *session,
     (void)pubkeydata_len; (void)algorithm; (void)flags; (void)application;
     (void)key_handle; (void)handle_len; (void)privatekeydata;
     (void)privatekeydata_len; (void)passphrase;
+    return -1;
+}
+
+/* libssh2 userauth.c's `_libssh2_key_sign_algorithm` calls this when
+ * picking RSA-SHA2 upgrades on a publickey auth attempt. Returning
+ * NULL means "no upgrade available" — for ed25519 there's nothing to
+ * negotiate anyway, and RSA isn't supported in this backend yet. */
+const char *
+_libssh2_supported_key_sign_algorithms(LIBSSH2_SESSION *session,
+                                         unsigned char *key_method,
+                                         size_t key_method_len) {
+    (void)session; (void)key_method; (void)key_method_len;
+    return NULL;
+}
+
+/* pem.c references this for bcrypt-encrypted (passphrase-protected)
+ * OpenSSH private keys. The full bcrypt KDF is ~250 LoC of Blowfish
+ * we don't have a port of; passphrase keys aren't supported yet, so
+ * return -1 and let `_libssh2_openssh_pem_parse_data` surface a
+ * decrypt failure. Unencrypted keys never reach this branch. */
+int _libssh2_bcrypt_pbkdf(const char *pass, size_t passlen,
+                            const uint8_t *salt, size_t saltlen,
+                            uint8_t *key, size_t keylen,
+                            unsigned int rounds) {
+    (void)pass; (void)passlen; (void)salt; (void)saltlen;
+    (void)key; (void)keylen; (void)rounds;
     return -1;
 }
 
