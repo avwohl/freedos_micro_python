@@ -28,6 +28,8 @@ Type "help()" for more information.
 
 ## Install
 
+> **Note:** not yet ready on PyPI — install from the GitHub repository for now.
+
 ```
 pip install freedos_micro_python
 ```
