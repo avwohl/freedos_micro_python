@@ -223,9 +223,18 @@ patch_main_pktdrv_prealloc() {
             print "static void _preallocate_bounce_buffer(void) {"
             print "    write(1, \"[bounce:pre-alloc]\\n\", 19);"
             print "    unsigned int regs[8] = {0};"
-            print "    regs[0] = 0x4800;       // AH=0x48 Allocate Memory"
+            print "    // DPMI fn 0x0100 (not INT 21h AH=0x48) so PMODE/W"
+            print "    // registers this segment in its DPMI tables. When"
+            print "    // we pass it as DS in an rmcs to DPMI 0x0301 — the"
+            print "    // dispatch our dos_int21_call uses for"
+            print "    // open/read/write/close — unregistered segments"
+            print "    // wedge the call after the binary grows large enough"
+            print "    // that AH=0x48 starts returning a different segment"
+            print "    // range. Symptom: open() hangs once a heavy module"
+            print "    // like _ssh / axtls / libssh2 is linked in."
+            print "    regs[0] = 0x0100;"
             print "    regs[1] = 128;          // 128 paragraphs = 2 KB"
-            print "    unsigned char carry = pktdrv_int_invoke(0x21, regs);"
+            print "    unsigned char carry = pktdrv_int_invoke(0x31, regs);"
             print "    write(1, \"[bounce:post-alloc]\\n\", 20);"
             print "    if (carry) return;"
             print "    unsigned int seg = regs[0] & 0xFFFF;"
@@ -684,6 +693,29 @@ patch_libssh2_scp_int64_format() {
     ' "$F"
 }
 
+patch_mp_scope_qstr_qstr() {
+    # MicroPython's upstream py/scope.h declares
+    #
+    #   id_info_t *scope_find_or_add_id(scope_t *scope, qstr qstr, ...);
+    #
+    # — typedef name `qstr` followed immediately by a parameter also
+    # named `qstr`. C allows this (the typedef is shadowed inside the
+    # parameter scope), but uc386's C23 parser rejects it as
+    # `unexpected token IDENT 'qstr' ... expected one of: ELLIPSIS,
+    # KW_ALIGNAS, ...`. The .c file uses `qst` for the same parameter
+    # already; renaming the .h to match keeps the API consistent and
+    # gets the parser past the prototype. Idempotent.
+    F=upstream/py/scope.h
+    [ -f "$F" ] || return 0
+    if grep -q "qstr qst," "$F" 2>/dev/null && \
+       ! grep -q "qstr qstr," "$F" 2>/dev/null; then
+        return 0
+    fi
+    echo "micropython: patching py/scope.h: rename 'qstr qstr' param to 'qstr qst' …"
+    sed -i.bak -E 's/qstr qstr,/qstr qst,/g; s/qstr qstr\)/qstr qst)/g' "$F"
+    rm -f "$F.bak"
+}
+
 patch_libssh2_bsd_types() {
     # libssh2's chacha.h / cipher-chachapoly.h use BSD typedefs
     # `u_int` and `u_char` which uc386's libc doesn't ship. crypt.c
@@ -985,6 +1017,7 @@ if [ -d upstream ]; then
     patch_libssh2_wait_socket
     patch_libssh2_scp_int64_format
     patch_tweetnacl_uc386dos
+    patch_mp_scope_qstr_qstr
     exit 0
 fi
 
@@ -1027,3 +1060,4 @@ patch_libssh2_crypto_engine_enum
 patch_libssh2_kex_ecsha_macro_hoist
 patch_libssh2_wait_socket
 patch_tweetnacl_uc386dos
+patch_mp_scope_qstr_qstr

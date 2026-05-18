@@ -154,6 +154,13 @@ void dos_int21_thunk_preinit(void) {
     (void)dos_int21_thunk_init();
 }
 
+// Stack-switching DPMI 0x0301 dispatcher in uc386's libc — switches
+// to a dedicated shallow stack before the INT 31h so PMODE/W's int
+// 31 handler doesn't choke on a deep PM stack. The deep-stack
+// chokehold otherwise wedges open()/read()/write() with no return
+// once MicroPython has built up its interpreter stack.
+extern unsigned char dpmi0301_call_shallow(void *rmcs);
+
 // Dispatch an INT 21h with the caller-supplied rmcs. CS:IP is forced
 // to our thunk; SS:SP=0:0 → DPMI picks a real-mode stack from its
 // own pool. On return, rm.flags has the real-mode FLAGS register
@@ -165,13 +172,7 @@ static int dos_int21_call(dos_rmcs_t *rm) {
     rm->ip = 0;
     rm->ss = 0;
     rm->sp = 0;
-    unsigned int dpmi[8] = {0};
-    dpmi[R_EAX] = 0x0301;
-    dpmi[R_EBX] = 0;             // INT number not used by 0x0301
-    dpmi[R_ECX] = 0;             // word count to copy from PM stack
-    dpmi[R_EDI] = (unsigned int)(unsigned long)rm;
-    unsigned char carry = pktdrv_int_invoke(0x31, dpmi);
-    return carry ? -1 : 0;
+    return dpmi0301_call_shallow(rm) ? -1 : 0;
 }
 
 // ------ public API -------------------------------------------------
