@@ -112,6 +112,40 @@ the test passed.
     (4) `ssh_server.py` registers `SFTPServer` via
     `set_subsystem_handler`, (5) `SSHTEST.PY` PASS print is
     leading-`\n` so the rig's column-anchored grep catches it.
+  - **Ed25519 publickey auth** (commits `f0a12d9` + `506efe0`).
+    `session.userauth_publickey(user, privkey_bytes[, pubkey_bytes,
+    passphrase])` wraps `libssh2_userauth_publickey_frommemory_ex`;
+    privkey is the in-memory contents of an OpenSSH-format
+    `id_ed25519` (the unencrypted `-----BEGIN OPENSSH PRIVATE
+    KEY-----` block). `port/libssh2_axtls.c`'s ed25519
+    sign/load-private stubs are replaced with real impls: signing
+    calls TweetNaCl's `crypto_sign` and returns the leading 64-byte
+    signature; loading walks libssh2's own
+    `_libssh2_openssh_pem_parse_memory` and copies the 32-byte
+    pub + 64-byte priv into a `libssh2_ed25519_ctx`. The same
+    parse builds the wire-format pubkey blob for
+    `_pub_priv_keyfilememory`, so `libssh2_userauth_publickey_frommemory`
+    can derive the pubkey from the private alone. Stubs
+    also added for `_libssh2_supported_key_sign_algorithms`
+    (returns NULL — no RSA-SHA2 upgrade) and `_libssh2_bcrypt_pbkdf`
+    (returns -1 — encrypted privkeys not supported yet, pem.c
+    surfaces a clean decrypt failure). The file-based variants
+    (`_new_private` / `_pub_priv_keyfile`) stay stubbed since uc386
+    has no fopen wired into libssh2; user code reads the file via
+    MicroPython's `open()` and passes bytes through. Rig coverage:
+    `run-ssh-rig.sh` generates a per-rig client key and inlines
+    its bytes into SSHTEST.PY at the `__CLIENT_KEY_BYTES__`
+    placeholder (the test can't `open('CLIENT.KEY')` after
+    `import _ssh` — DOS INT 21h AH=3D hangs in the DPMI 0x0301
+    thunk from the paste-mode REPL, root cause not yet pinned).
+    SSHTEST opens a 2nd socket+Session after the password path
+    closes, runs `userauth_publickey('pkuser', CLIENT_PRIVKEY)`,
+    execs `echo PUBKEY_RIG_OK`, and gates PASS on the marker.
+    `_handle_exec` in `ssh_server.py` is now a tiny real `echo`
+    impl so password and pubkey paths can ask for different
+    markers; `serve_one` accepts sequential connections so the
+    same server can serve both sessions.
+
   - **SFTP filesystem-ops surface** (commits `09064fe` +
     `8eadb57`). `session.sftp()` now exposes `opendir` (→ `SFTPDir`
     with `.read()` → `(name, attrs)` | `None`), `mkdir`, `rmdir`,
@@ -155,11 +189,29 @@ the test passed.
    `port/libssh2_axtls.c`. Currently stubs returning `-1`. Needed
    for non-ed25519 server keys and DH-group KEX fallback.
 
-2. **Public-key auth** — `session.userauth_publickey(user, key)`
-   wraps `libssh2_userauth_publickey_fromfile_ex`. Today only
-   password auth is exposed.
+2. **DOS INT 21h `open()` hang in paste-mode REPL after
+   `import _ssh`.** The ssh-rig works around this by inlining
+   the client privkey bytes into SSHTEST.PY at build time
+   (`run-ssh-rig.sh` substitutes `__CLIENT_KEY_BYTES__`). Repro:
+   any `open('FOO.TXT', 'rb')` from a script fed via COM1
+   paste-mode wedges inside the DPMI 0x0301 thunk after
+   `import _ssh` (even with just `_ssh.version()` called).
+   Doesn't repro from a freshly-booted REPL or when the script
+   runs without `_ssh`. Most likely culprit: something in
+   _ssh's module init / libssh2 lazy-init / linked-in axtls
+   bigint code is leaving DOS/DPMI state inconsistent. Fixing
+   this would also be needed for SSH/SCP client tools that
+   want to read keys/data from disk at runtime rather than via
+   a build-time substitution.
 
-3. **Expose POSIX TCP_NODELAY in modlwip.** modlwip's `case
+3. **Public-key auth from file** —
+   `session.userauth_publickey_fromfile(user, pub_path,
+   priv_path, passphrase)`. Requires either the open() hang
+   above to be fixed, or a Python-side helper that reads the
+   file via MicroPython `open()` and calls the existing
+   `userauth_publickey(user, privkey_bytes)`.
+
+4. **Expose POSIX TCP_NODELAY in modlwip.** modlwip's `case
    TCP_NODELAY:` switch matches on the lwIP `TF_NODELAY = 0x40`
    constant, not POSIX `TCP_NODELAY = 1`. Currently nobody needs
    to set NODELAY (SSHTEST works without it after the EOF→EAGAIN
