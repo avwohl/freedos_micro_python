@@ -82,9 +82,5 @@ with the actual `wget`.
 
 ## Source
 
-```python
-{% include_relative ../../examples/wget.py %}
-```
-
-(View on GitHub:
-[`examples/wget.py`](https://github.com/avwohl/freedos_micro_python/blob/main/examples/wget.py))
+View on GitHub:
+[`examples/wget.py`](https://github.com/avwohl/freedos_micro_python/blob/main/examples/wget.py)
