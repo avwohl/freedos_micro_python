@@ -189,20 +189,25 @@ the test passed.
    `port/libssh2_axtls.c`. Currently stubs returning `-1`. Needed
    for non-ed25519 server keys and DH-group KEX fallback.
 
-2. **DOS INT 21h `open()` hang in paste-mode REPL after
-   `import _ssh`.** The ssh-rig works around this by inlining
-   the client privkey bytes into SSHTEST.PY at build time
-   (`run-ssh-rig.sh` substitutes `__CLIENT_KEY_BYTES__`). Repro:
-   any `open('FOO.TXT', 'rb')` from a script fed via COM1
-   paste-mode wedges inside the DPMI 0x0301 thunk after
-   `import _ssh` (even with just `_ssh.version()` called).
-   Doesn't repro from a freshly-booted REPL or when the script
-   runs without `_ssh`. Most likely culprit: something in
-   _ssh's module init / libssh2 lazy-init / linked-in axtls
-   bigint code is leaving DOS/DPMI state inconsistent. Fixing
-   this would also be needed for SSH/SCP client tools that
-   want to read keys/data from disk at runtime rather than via
-   a build-time substitution.
+2. **`open()` after `import _ssh` hangs in DPMI 0x0301 on
+   PMODE/W.** Partially mitigated: commit `ed43d0a` +
+   uc386@`488fe19` added (a) a stack-switching INT 31 dispatcher
+   `dpmi0301_call_shallow` so the call always runs from a fresh
+   8 KB static PM stack (eliminates the variant where a single
+   Python function frame triggered the hang), (b) thunk
+   preinit at main() entry, (c) DPMI-fn-0x0100-allocated bounce
+   buffer. The ssh-rig still works around the residual case via
+   build-time inline of CLIENT.KEY bytes into SSHTEST.PY
+   (`__CLIENT_KEY_BYTES__` placeholder). Repro of what's still
+   broken: minimal `import sys; import _ssh; open('X.TXT', 'rb')`
+   wedges immediately at the DPMI 0x0301 dispatch — no return,
+   no fault. Independent of write()s before/after, stack depth,
+   or bounce segment allocator. Cross-emulator test inconclusive:
+   DOSBox-X hangs MP.EXE even earlier (before `main()` runs);
+   dosiz can't load PMODE/W binaries. Likely needs PMODE/W
+   replacement or a deeper look at what `import _ssh` does to
+   memory layout — possibly some libssh2/axtls/tweetnacl static
+   relocation that touches a PMODE/W-tracked range.
 
 3. **Public-key auth from file** —
    `session.userauth_publickey_fromfile(user, pub_path,
