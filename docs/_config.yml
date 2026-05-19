@@ -1,0 +1,33 @@
+title: FreeDOS MicroPython Manual
+description: >-
+  Python 3 for FreeDOS / i386. Manual covering the REPL, every
+  bundled module, networking with lwIP + axtls + libssh2, and
+  DOS-specific features.
+remote_theme: pages-themes/cayman@v0.2.0
+plugins:
+  - jekyll-remote-theme
+  - jekyll-relative-links
+  - jekyll-default-layout
+relative_links:
+  enabled: true
+  collections: false
+defaults:
+  - scope:
+      path: ""
+    values:
+      layout: default
+
+# These doc files predate the manual and would otherwise become
+# orphaned cayman pages; serve them as plain markdown instead of
+# rendering with the theme. The manual links to them where it
+# makes sense.
+exclude:
+  - WIP.md
+  - TESTS.md
+  - THIRD_PARTY.md
+
+# GitHub-flavoured rendering for fenced code, tables, task lists.
+markdown: kramdown
+kramdown:
+  input: GFM
+  syntax_highlighter: rouge
