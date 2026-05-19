@@ -202,12 +202,28 @@ the test passed.
    broken: minimal `import sys; import _ssh; open('X.TXT', 'rb')`
    wedges immediately at the DPMI 0x0301 dispatch — no return,
    no fault. Independent of write()s before/after, stack depth,
-   or bounce segment allocator. Cross-emulator test inconclusive:
-   DOSBox-X hangs MP.EXE even earlier (before `main()` runs);
-   dosiz can't load PMODE/W binaries. Likely needs PMODE/W
-   replacement or a deeper look at what `import _ssh` does to
-   memory layout — possibly some libssh2/axtls/tweetnacl static
-   relocation that touches a PMODE/W-tracked range.
+   or bounce segment allocator. Cross-emulator status:
+   - DOSBox-X hangs even earlier; the bridge's `int 0x80` divmod
+     probe wedges in DOSBox-X's PMODE/W IDT (unhandled gate, no
+     fault recovery). Fixed by uc386@`4b1b849` (install our int
+     0x80 handler unconditionally) — DOSBox-X now reaches
+     `[mp-main-entered]`. Second-layer issue: V86-reflected
+     `INT 21h AH=0x40` write() with high-address buffers from
+     main()'s libc `_write` hangs. PMODE/W's bounce isn't
+     reaching DOSBox-X correctly.
+   - dosiz: same `int 0x80` fix gets it to `[mp-main-entered]`
+     and the first `_preallocate_bounce_buffer` call. Then
+     dosbox-staging's strict CPU emulator aborts on the first
+     INT 31 with `INT:Inner level:Stack segment not writable`.
+     Tracing shows: PMODE/W returns from V86 INT 21h handlers
+     via `retf` to a CS with RPL=1, dropping CPL to 1; PMODE/W
+     then expects the TSS SS0 to be valid for ring-0 transition
+     during INT 31 — but TSS SS0 = selector 0x00f4 with an
+     invalid (type=0) descriptor. Real CPUs would #TS-fault
+     too. Either PMODE/W's TSS isn't fully initialized (it
+     assumes the client stays at ring 0) or dosbox-staging is
+     reading a stale GDT view; would need PMODE/W reverse-
+     engineering or a sizeable dosbox patch to fully fix.
 
 3. **Public-key auth from file** —
    `session.userauth_publickey_fromfile(user, pub_path,
