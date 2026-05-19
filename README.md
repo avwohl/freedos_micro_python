@@ -7,6 +7,8 @@ runnable flat-binary or PMODE/W `.exe` with a fully-functional
 Python REPL — arithmetic, control flow, classes, list comprehensions,
 exception handling, and ~25 named builtins all work.
 
+**📖 User manual:** <https://avwohl.github.io/freedos_micro_python/>
+
 ```
 MicroPython uc386-triage on 2026-05-01; uc386-dos with i386
 Type "help()" for more information.
