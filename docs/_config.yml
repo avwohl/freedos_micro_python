@@ -31,7 +31,7 @@ exclude:
 # the `_ssh` library page so the leading underscore (matching the
 # Python module name) doesn't make it disappear.
 include:
-  - library/_ssh.md
+  - library/ssh.md
 
 # GitHub-flavoured rendering for fenced code, tables, task lists.
 markdown: kramdown

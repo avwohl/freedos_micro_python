@@ -31,7 +31,7 @@ adapted from the official documentation of the following projects:
 
 - [**libssh2 documentation**](https://www.libssh2.org/docs.html),
   BSD-3-Clause, Copyright © 2004-2024 The libssh2 project.
-  Terminology in [`_ssh`](library/_ssh.md).
+  Terminology in [`_ssh`](library/ssh.md).
 
 Material original to this manual — DOS-specific quirks, the
 networking-internals page, the troubleshooting guide, this

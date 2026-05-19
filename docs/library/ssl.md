@@ -98,7 +98,7 @@ debug builds; users normally don't need to look.
 ## See also
 
 - [`socket`](socket.md) — the underlying transport
-- [`_ssh`](_ssh.md) — SSH client (separate cryptography stack:
+- [`_ssh`](ssh.md) — SSH client (separate cryptography stack:
   axtls + TweetNaCl + libssh2)
 
 ---

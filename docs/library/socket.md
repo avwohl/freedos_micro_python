@@ -151,7 +151,7 @@ except OSError as e:
 ## See also
 
 - [`ssl`](ssl.md) — wrap a socket in TLS
-- [`_ssh`](_ssh.md) — wrap a socket in SSH
+- [`_ssh`](ssh.md) — wrap a socket in SSH
 - [`select`](select.md) — multiplex multiple sockets
 - [`lwip`](lwip.md) — the underlying stack
 - [`uc386_net`](uc386_net.md) — interface configuration

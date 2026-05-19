@@ -102,7 +102,7 @@ After this, `socket.socket()` etc. work.
 ## See also
 
 - [`socket`](socket.md), [`lwip`](lwip.md), [`ssl`](ssl.md),
-  [`_ssh`](_ssh.md)
+  [`_ssh`](ssh.md)
 - [Packet driver INT 60h, lwIP poll loop](../networking-internals.md)
   for the low-level mechanics.
 

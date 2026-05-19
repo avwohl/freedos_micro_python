@@ -70,7 +70,7 @@ Numerics + data:
 
 Networking + crypto:
 - [`socket`](library/socket.md), [`ssl`](library/ssl.md),
-  [`select`](library/select.md), [`_ssh`](library/_ssh.md),
+  [`select`](library/select.md), [`_ssh`](library/ssh.md),
   [`lwip`](library/lwip.md), [`uc386_net`](library/uc386_net.md)
 
 Concurrency:

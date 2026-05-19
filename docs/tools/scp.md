@@ -5,7 +5,7 @@ title: SCP.PY
 # `SCP.PY` — SCP client
 
 A pure-MicroPython SCP-1 client wrapping
-[`_ssh.Session`](../library/_ssh.md). Transfers single files
+[`_ssh.Session`](../library/ssh.md). Transfers single files
 between DOS and a remote server using SSH (`scp` protocol).
 
 Source: [`examples/scp.py`](https://github.com/avwohl/freedos_micro_python/blob/main/examples/scp.py).
