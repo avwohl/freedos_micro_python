@@ -211,27 +211,24 @@ the test passed.
      `INT 21h AH=0x40` write() with high-address buffers from
      main()'s libc `_write` hangs. PMODE/W's bounce isn't
      reaching DOSBox-X correctly.
-   - dosiz: bigger workaround landed in dosiz (`c0222f9`,
-     local-only — push blocked by remote-ahead). The two
-     patches: `DOSIZ_BYPASS_EXTENDER=1` env var that suppresses
-     the PMODE/W stub auto-detect so dosiz uses its own LE
-     loader + DPMI instead of letting PMODE/W's internal DPMI
-     take over; and stack-object synthesis for LE headers that
-     report `stack_obj=0` (PMODE/W binaries never fill it).
-     With these, dosiz now loads MP.EXE, runs the bridge stub,
-     calls main(), runs `_preallocate_bounce_buffer` etc, hits
-     `mp_init`, and reaches the REPL prompt. Multiple
-     `print(str)` calls succeed end-to-end. Remaining failure:
-     anything triggering 64-bit divmod via `int 0x80` (i.e.,
-     `print(4)`, `sys.exit(0)`) faults with
-     `INT:Inner level:Stack segment not writable` — the bridge's
-     `_bridge_int80_handler` iretd path drifts CPL away from 0
-     under dosbox-staging's CPU emulation, and the next
-     interrupt's inner-level transition needs a TSS SS slot
-     that isn't set up. Worth pursuing in a future iteration;
-     dosiz-native uc386 binaries (no PMODE/W stub) wouldn't hit
-     this since dosiz's own `dosiz_int80` CB_IRETD handler
-     stays at CPL=0.
+   - dosiz: works end-to-end with three dosiz patches
+     (`c0222f9` + `237339d`, local-only — pushes blocked by
+     remote-ahead). (1) `DOSIZ_BYPASS_EXTENDER=1` env var
+     suppresses the PMODE/W stub auto-detect so dosiz uses its
+     own LE loader + DPMI; (2) stack-object synthesis for LE
+     headers reporting `stack_obj=0` (PMODE/W never fills it
+     because PMODE/W normally sets up its own stack at runtime);
+     (3) DPMI fn 0x0205 picks the gate width (32- vs 16-bit)
+     from the target CS descriptor's D-flag, not from the
+     dispatcher's `cpu.code.big` — the latter is empirically
+     false in the int 31 CB_IRETD context even when the client
+     is 32-bit, causing the wrong gate type to be installed for
+     uc386's int 0x80 divmod trap. With these, MP.EXE under
+     dosiz: loads, runs the bridge stub, calls main, runs
+     `_preallocate_bounce_buffer` etc, hits `mp_init`, reaches
+     the REPL, and runs arbitrary scripts including
+     `print(2 ** 32)` (4294967296), `import sys`, and
+     `sys.exit(0)` with clean exit through bridge-post-main.
 
 3. **Public-key auth from file** —
    `session.userauth_publickey_fromfile(user, pub_path,
