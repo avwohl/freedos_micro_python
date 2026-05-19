@@ -212,18 +212,22 @@ the test passed.
      main()'s libc `_write` hangs. PMODE/W's bounce isn't
      reaching DOSBox-X correctly.
    - dosiz: same `int 0x80` fix gets it to `[mp-main-entered]`
-     and the first `_preallocate_bounce_buffer` call. Then
-     dosbox-staging's strict CPU emulator aborts on the first
-     INT 31 with `INT:Inner level:Stack segment not writable`.
-     Tracing shows: PMODE/W returns from V86 INT 21h handlers
-     via `retf` to a CS with RPL=1, dropping CPL to 1; PMODE/W
-     then expects the TSS SS0 to be valid for ring-0 transition
-     during INT 31 — but TSS SS0 = selector 0x00f4 with an
-     invalid (type=0) descriptor. Real CPUs would #TS-fault
-     too. Either PMODE/W's TSS isn't fully initialized (it
-     assumes the client stays at ring 0) or dosbox-staging is
-     reading a stale GDT view; would need PMODE/W reverse-
-     engineering or a sizeable dosbox patch to fully fix.
+     and the first `_preallocate_bounce_buffer` call. Deeper
+     trace via patched cpu.cpp logs in dosbox-staging shows
+     PMODE/W's INT 21h V86 trampoline returns through three
+     successive retfs with stacked CS at RPL=1, then RPL=2,
+     then RPL=3 (selectors 0x0009, 0x000a, 0x000b — same GDT
+     slot, drifting RPL bits). The TSS only has SS0 valid;
+     SS1/SS2/SS3 read garbage. Patching dosbox-staging to mask
+     the spurious RPL drift gets past one retf at a time but
+     cascades into "RET from illegal descriptor type" further
+     in (PMODE/W's subsequent code relies on the stack having
+     been switched). Fully fixing this means modelling PMODE/W's
+     internal ring-transition trampoline; would need either
+     PMODE/W source to understand the intended sequence, or a
+     significantly bigger dosbox-staging patch that treats
+     PMODE/W binaries as a special CPU-emulation mode. Left
+     unfixed for now.
 
 3. **Public-key auth from file** —
    `session.userauth_publickey_fromfile(user, pub_path,
