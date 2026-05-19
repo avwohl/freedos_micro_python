@@ -26,6 +26,13 @@ exclude:
   - TESTS.md
   - THIRD_PARTY.md
 
+# Files/directories starting with `_` are skipped by Jekyll by
+# default (drafts / partials / collections). Explicitly include
+# the `_ssh` library page so the leading underscore (matching the
+# Python module name) doesn't make it disappear.
+include:
+  - library/_ssh.md
+
 # GitHub-flavoured rendering for fenced code, tables, task lists.
 markdown: kramdown
 kramdown:
