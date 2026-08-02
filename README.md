@@ -166,12 +166,10 @@ per-project licenses. The full catalog with attributions is in
 
 ## Related projects
 
-- [FreeDOS](https://www.freedos.org/) — the target OS.
-- [uc386](https://github.com/avwohl/uc386) — the C23 compiler that
-  builds this port. Hosts the `dos_emu` test harness.
-- [uc_core](https://github.com/avwohl/uc_core) — shared C23 frontend
-  used by uc386 (and the Z80 sibling, uc80).
-- [MicroPython](https://github.com/micropython/micropython) — upstream.
+- [FreeDOS](https://www.freedos.org/) — The target operating system. This port runs on FreeDOS on i386.
+- [uc386](https://github.com/avwohl/uc386) — C23 compiler for the i386 processor and MS-DOS. It builds this port and hosts the `dos_emu` test harness.
+- [uc_core](https://github.com/avwohl/uc_core) — Shared C23 frontend and AST optimizer that the uc386 compiler and its Z80 sibling uc80 both use.
+- [MicroPython](https://github.com/micropython/micropython) — The upstream project. This repository is its port for FreeDOS on i386.
 
 ## MicroPython feature matrix
 
