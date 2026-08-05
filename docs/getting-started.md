@@ -104,7 +104,7 @@ and `dosbox-x -conf yourconf.conf`.
 [dosiz](https://github.com/avwohl/dosiz) is an MS-DOS emulator that
 links dosbox-staging's CPU emulator in-process and traps INT 21h
 to C++ host implementations. As of dosiz commit
-[`237339d`](https://github.com/avwohl/dosiz/commit/237339d) it
+[`92bb991`](https://github.com/avwohl/dosiz/commit/92bb991) it
 runs MicroPython's PMODE/W-wrapped MP.EXE end-to-end:
 
 ```bash

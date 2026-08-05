@@ -110,7 +110,7 @@ dispatcher).
 ## `print(int)` aborts on dosiz
 
 Need dosiz @ commit
-[`237339d`](https://github.com/avwohl/dosiz/commit/237339d) or
+[`1b42bec`](https://github.com/avwohl/dosiz/commit/1b42bec) or
 later. Older dosiz set the int 0x80 IDT gate to 16-bit because of
 a `cpu.code.big` race, mis-aligning the bridge's iretd frame.
 
