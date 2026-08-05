@@ -160,7 +160,7 @@ wrote. Without the patch the same run produces only 481 bytes
 commits earlier in the program's startup).
 
 The unified diff is in
-[`dosbox-x-fix.patch`](https://github.com/avwohl/uc386/blob/main/addons/gnu/micropython/dosbox-x-rig/dosbox-x-fix.patch)
+[`dosbox-x-fix.patch`](https://github.com/avwohl/freedos_micro_python/blob/main/rigs/dosbox-x-rig/dosbox-x-fix.patch)
 in this repo.
 
 ## Side note: `LocalFile::Write` is buffered on POSIX
