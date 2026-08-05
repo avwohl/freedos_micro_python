@@ -76,7 +76,7 @@ with open('CLIENT.KEY', 'rb') as f:
 sess.userauth_publickey('me', privkey)
 ```
 
-(See ["DOS open() hang"](../troubleshooting.md#dos-open-hang) for
+(See ["`open()` hangs after `import _ssh`"](../troubleshooting.md#open-hangs-after-import-_ssh) for
 a current `open()` gotcha that the bundled `sftp.py` etc. work
 around with build-time inlining.)
 
