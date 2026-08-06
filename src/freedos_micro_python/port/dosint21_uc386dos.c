@@ -188,6 +188,87 @@ static int dos_int21_thunk_init(void) {
 // Running it once at program entry, before MP builds up its stack,
 // keeps every subsequent `dos_int21_call` to just the DPMI 0x0301
 // real-mode-call gate, which is stack-depth-safe.
+// Emit "<label>=XXXXXXXX\n" so the serial log carries real values.
+// There is no printf on this path and no debugger on real hardware,
+// and every interesting quantity here is an address.
+static void dos_dbg_hex(const char *label, unsigned int v) {
+    extern int write(int fd, const void *buf, unsigned int n);
+    static const char hexd[] = "0123456789abcdef";
+    char buf[64];
+    unsigned int n = 0;
+    while (label[n] && n < 40) { buf[n] = label[n]; n++; }
+    buf[n++] = '=';
+    for (int s = 28; s >= 0; s -= 4) buf[n++] = hexd[(v >> s) & 0xF];
+    buf[n++] = '\n';
+    write(1, buf, n);
+}
+
+// Establish the flat-32 linear address that aliases the real-mode
+// bounce paragraph, and prove it before anything relies on it.
+//
+// main.c resolves this with DPMI 0x0002 (segment -> descriptor) and
+// 0x0006 (descriptor -> linear base) but DISCARDS the carry flag from
+// both calls, so a failure silently leaves a wild value in the global.
+// Every dos_int21_* call then copies its path/data there while real
+// mode reads the actual paragraph — surfacing as a phantom "file not
+// found" for a file that plainly exists.
+//
+// The two source files also disagreed about the memory model: main.c
+// asserts "PMODE/W uses paging, seg << 4 is NOT the linear address",
+// while dos_int21_open assumed the bounce is "identity-mapped by the
+// extender". Rather than pick a side, resolve both, cross-check, and
+// log what was chosen so the serial log settles it.
+static int dos_bounce_resolve(void) {
+    unsigned int seg = pktdrv_preallocated_bounce_seg;
+    if (seg == 0) return -1;
+
+    unsigned int linear_shift = seg << 4;
+    unsigned int linear_dpmi = 0;
+
+    unsigned int r2[8] = {0};
+    r2[R_EAX] = 0x0002;
+    r2[R_EBX] = seg;
+    if (!pktdrv_int_invoke(0x31, r2)) {
+        unsigned int sel = r2[R_EAX] & 0xFFFF;
+        unsigned int r3[8] = {0};
+        r3[R_EAX] = 0x0006;
+        r3[R_EBX] = sel;
+        if (!pktdrv_int_invoke(0x31, r3)) {
+            linear_dpmi = ((r3[R_ECX] & 0xFFFF) << 16) |
+                          (r3[R_EDX] & 0xFFFF);
+        }
+    }
+
+    dos_dbg_hex("[bounce:seg]", seg);
+    dos_dbg_hex("[bounce:shift]", linear_shift);
+    dos_dbg_hex("[bounce:dpmi]", linear_dpmi);
+    dos_dbg_hex("[bounce:main]", pktdrv_preallocated_bounce_linear);
+
+    // Prefer an address the two methods agree on; otherwise take the
+    // one backed by a successful DPMI resolution. seg << 4 is the
+    // fallback of last resort, not a guess: conventional memory under
+    // a zero-based flat client is identity-mapped.
+    unsigned int chosen;
+    if (linear_dpmi != 0) {
+        chosen = linear_dpmi;
+    } else {
+        chosen = linear_shift;
+    }
+
+    // Writable-and-readable only proves the memory exists, not that it
+    // aliases the paragraph — but a failure here is decisive.
+    volatile unsigned char *b = (volatile unsigned char *)chosen;
+    b[0] = 0x55; b[1] = 0xAA;
+    if (b[0] != 0x55 || b[1] != 0xAA) {
+        dos_dbg_hex("[bounce:UNWRITABLE]", chosen);
+        return -1;
+    }
+
+    pktdrv_preallocated_bounce_linear = chosen;
+    dos_dbg_hex("[bounce:chosen]", chosen);
+    return 0;
+}
+
 void dos_int21_thunk_preinit(void) {
     // Report the outcome. This used to be discarded, which meant a
     // failed thunk arm was indistinguishable from a good one until
@@ -195,6 +276,9 @@ void dos_int21_thunk_preinit(void) {
     // and they are the only visibility into this path on real
     // hardware, where there is no debugger.
     extern int write(int fd, const void *buf, unsigned int n);
+    if (dos_bounce_resolve() != 0) {
+        write(1, "[bounce:RESOLVE-FAILED]\n", 24);
+    }
     if (dos_int21_thunk_init() == 0) {
         write(1, "[i21thunk:armed]\n", 17);
     } else {

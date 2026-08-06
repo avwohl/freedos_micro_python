@@ -269,7 +269,21 @@ static mp_obj_t uc386dos_builtin_open(size_t n_args, const mp_obj_t *args,
     int err = 0;
     int fd = dos_int21_open(fname, dos_mode, &err);
     if (fd < 0) {
-        mp_raise_OSError(MP_ENOENT);
+        // Report what actually went wrong. This used to raise ENOENT
+        // unconditionally, which made a DPMI/thunk-level failure
+        // indistinguishable from a genuinely missing file — the two
+        // need very different fixes, and conflating them hid a
+        // machine-killing bug behind a plausible "no such file".
+        //   err == 0 : the call never reached DOS (setup/DPMI failure)
+        //   2, 3     : file / path not found
+        //   4        : too many open files
+        //   5        : access denied
+        switch (err) {
+            case 0:  mp_raise_OSError(MP_EIO);    break;
+            case 4:  mp_raise_OSError(MP_EMFILE); break;
+            case 5:  mp_raise_OSError(MP_EACCES); break;
+            default: mp_raise_OSError(MP_ENOENT); break;
+        }
     }
     mp_obj_uc386dos_file_t *f = mp_obj_malloc(mp_obj_uc386dos_file_t, type);
     f->fd = fd;
