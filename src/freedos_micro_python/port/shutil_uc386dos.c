@@ -57,7 +57,13 @@ static mp_obj_t shutil_copyfile(mp_obj_t src_in, mp_obj_t dst_in) {
     // Open dst write+truncate. Our libc routes a writable open
     // through INT 21h AH=0x3C (CREATE), which truncates if the
     // file exists.
-    int dst_fd = open(dst, 1);  // O_WRONLY -> our libc handles create-or-truncate
+    // O_WRONLY|O_CREAT|O_TRUNC (1 | 0100 | 01000 = 0x241). Spell the
+    // intent out rather than relying on the libc to infer it: bare
+    // O_WRONLY now maps to INT 21h AH=0x3D (Open Existing), which
+    // cannot create the destination. It used to work only because
+    // _open called dos_emu's private AH=0xA0, a function that does not
+    // exist on real DOS at all.
+    int dst_fd = open(dst, 0x241);
     if (dst_fd < 0) {
         close(src_fd);
         mp_raise_OSError(MP_EIO);

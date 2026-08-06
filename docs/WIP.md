@@ -189,53 +189,117 @@ the test passed.
    `port/libssh2_axtls.c`. Currently stubs returning `-1`. Needed
    for non-ed25519 server keys and DH-group KEX fallback.
 
-2. **`open()` after `import _ssh` hangs in DPMI 0x0301 on
-   PMODE/W.** Partially mitigated: commit `ed43d0a` +
-   uc386@`488fe19` added (a) a stack-switching INT 31 dispatcher
-   `dpmi0301_call_shallow` so the call always runs from a fresh
-   8 KB static PM stack (eliminates the variant where a single
-   Python function frame triggered the hang), (b) thunk
-   preinit at main() entry, (c) DPMI-fn-0x0100-allocated bounce
-   buffer. The ssh-rig still works around the residual case via
-   build-time inline of CLIENT.KEY bytes into SSHTEST.PY
-   (`__CLIENT_KEY_BYTES__` placeholder). Repro of what's still
-   broken: minimal `import sys; import _ssh; open('X.TXT', 'rb')`
-   wedges immediately at the DPMI 0x0301 dispatch — no return,
-   no fault. Independent of write()s before/after, stack depth,
-   or bounce segment allocator. Cross-emulator status:
-   - DOSBox-X hangs even earlier; the bridge's `int 0x80` divmod
-     probe wedges in DOSBox-X's PMODE/W IDT (unhandled gate, no
-     fault recovery). Fixed by uc386@`4b1b849` (install our int
-     0x80 handler unconditionally) — DOSBox-X now reaches
-     `[mp-main-entered]`. Second-layer issue: V86-reflected
-     `INT 21h AH=0x40` write() with high-address buffers from
-     main()'s libc `_write` hangs. PMODE/W's bounce isn't
-     reaching DOSBox-X correctly.
-   - dosiz: works end-to-end with three dosiz patches
-     (`c0222f9` + `237339d`, local-only — pushes blocked by
-     remote-ahead). (1) `DOSIZ_BYPASS_EXTENDER=1` env var
-     suppresses the PMODE/W stub auto-detect so dosiz uses its
-     own LE loader + DPMI; (2) stack-object synthesis for LE
-     headers reporting `stack_obj=0` (PMODE/W never fills it
-     because PMODE/W normally sets up its own stack at runtime);
-     (3) DPMI fn 0x0205 picks the gate width (32- vs 16-bit)
-     from the target CS descriptor's D-flag, not from the
-     dispatcher's `cpu.code.big` — the latter is empirically
-     false in the int 31 CB_IRETD context even when the client
-     is 32-bit, causing the wrong gate type to be installed for
-     uc386's int 0x80 divmod trap. With these, MP.EXE under
-     dosiz: loads, runs the bridge stub, calls main, runs
-     `_preallocate_bounce_buffer` etc, hits `mp_init`, reaches
-     the REPL, and runs arbitrary scripts including
-     `print(2 ** 32)` (4294967296), `import sys`, and
-     `sys.exit(0)` with clean exit through bridge-post-main.
+   Assessed, not started. The primitives are already in the tree —
+   `upstream/lib/axtls/crypto/rsa.c` and `bigint.c` — and the stub
+   signatures map onto them almost 1:1, so this is ordinary work
+   rather than a research problem. Slices in value order:
+
+   - **(a) RSA host-key verification.** The one that actually
+     unblocks users, since most servers still present an RSA host
+     key. `_libssh2_axtls_rsa_new` with only `edata`/`ndata`
+     populated is `RSA_pub_key_new(&ctx, ndata, nlen, edata, elen)`.
+     `_libssh2_axtls_rsa_sha1_verify` / `..._sha2_verify` are then
+     `RSA_decrypt(ctx, sig, out, sizeof out, 0)` followed by a
+     PKCS#1 v1.5 DigestInfo comparison: strip the `00 01 FF..FF 00`
+     padding, match the ASN.1 DigestInfo prefix for the hash in
+     question, then `memcmp` the digest. Both prefixes are fixed
+     byte strings; hard-code them rather than pulling in an ASN.1
+     parser.
+   - **(b) DH group KEX.** `_libssh2_axtls_dh_key_pair` and
+     `_libssh2_axtls_dh_secret` are modular exponentiation over the
+     group prime, which axtls's `bi_mod_power` already provides.
+     Only needed as a fallback; curve25519 works today.
+   - **(c) RSA private keys** (`_libssh2_axtls_rsa_new_private*`).
+     Biggest slice and lowest value: it means parsing the OpenSSH
+     private key container, which may be bcrypt-KDF encrypted, and
+     axtls brings no parser for it. Do this last, and only if
+     client-side pubkey auth is actually wanted — the build-time
+     inlining recipe in
+     [`docs/library/ssh.md`](library/ssh.md) covers that case today.
+
+   **Do not land (a) without an end-to-end test.** A signature
+   verifier that returns "valid" on a bad signature is worse than
+   one that refuses everything, which is what the stub does now.
+   `rigs/ssh-rig/` drives a real paramiko server and is the right
+   harness; point it at an RSA host key instead of ed25519. Note
+   that rig needs networking under QEMU but not disk, so item 2
+   does not block it.
+
+2. **Disk I/O wedges under QEMU + FreeDOS + PMODE/W.** Any DOS
+   call that touches a physical sector hangs: no fault, no
+   return, no traceback. Everything else works.
+
+   **This is not a bug in `dosint21_uc386dos.c`.** The previous
+   entry here blamed "open() after `import _ssh` hangs in DPMI
+   0x0301"; measurement disproves that framing. What is now
+   established, with the evidence:
+
+   - **The DPMI 0x0301 gate is sound.** Reading the `NUL`
+     device through the very same thunk is flawless and
+     repeatable — `open("NUL","rb")`, `read(4)` returning
+     `b"\x00\x00\x00\x00"`, `close()`, each bracketed by
+     `[i21:call]` / `[i21:ret]`.
+   - **The bounce buffer really is shared with real mode, in
+     both directions.** Poisoning it with `0xEE` and issuing
+     INT 21h AH=0x47 (Get Current Directory) yields
+     `[map:after47]=00eeeeee` — DOS wrote its terminating NUL
+     at offset 0 and left the rest, exactly right for a root
+     directory. Earlier checks only ever read back our own
+     write, which any writable memory passes.
+   - **The filename reaching DOS is correct**:
+     `[open:name0]=44415441` ("DATA"), `[open:name4]=2e545854`
+     (".TXT").
+   - **Addresses and allocations are correct.** The client flat
+     base is 0 (`[client:dsbase]=00000000`), the image is
+     relocated above 1 MB (`[addr:text]=0016354d`), the DPMI
+     0x0002/0x0006 answer and `seg << 4` agree exactly
+     (`0x3003` -> `0x30030`), and no allocation overlaps
+     (`[seg:i21thunk]=3084`, stack `3086..3186` growing *down*
+     from `0x0FFE`, so it never reaches the thunk).
+   - **Both independent paths fail identically.** Routing the
+     whole file API through PMODE/W's *own* INT 21h translation
+     instead of our thunk (`dos_use_libc_io = 1` in
+     `dosint21_uc386dos.c`) wedges on disk reads in exactly the
+     same way. The common factor is not our code.
+   - **It works elsewhere.** Under DOSBox-X, whose `mount`
+     serves files through its own DOS layer with no BIOS INT 13h
+     path, the full sequence succeeds through our thunk:
+     `open` / `read` returning real file content / `close`, and
+     `MP.EXE HELLO.PY one two` runs the script and reports
+     `sys.argv == ["HELLO.PY", "one", "two"]`.
+
+   So the remaining suspect is real-mode BIOS disk I/O (INT 13h)
+   executed while running as a PMODE/W protected-mode client:
+   the floppy BIOS waits on IRQ 6 and that wait never completes.
+   A FAT16 IDE hard disk behaves the same, so it is not
+   floppy- or IRQ-6-specific.
+
+   **Where to look next — and it is not this port.** Whether
+   hardware interrupts are delivered at all while the client is
+   inside a DPMI real-mode call is an extender/host concern.
+   Before any further work goes into `dosint21_uc386dos.c`,
+   confirm the behaviour on the real deployment target (FreeDOS
+   under VMware) or on dosiz. dosiz could not be used for this:
+   it faults with `#GP` at `CS:EIP=002c:00000ff3` before
+   reaching `main`, needing the DPMI fn 0x0205 gate-width patch
+   recorded below as local-only and absent from the checkout.
+
+   **One loose end, stated plainly:** across rebuilds that
+   differed only in code layout, `open()` alternated between
+   succeeding and returning a spurious `ENOENT` under QEMU. That
+   instability is unexplained. The conclusion above rests on the
+   NUL-vs-disk and thunk-vs-translation contrasts, both of which
+   were consistent, rather than on run-to-run determinism.
 
 3. **Public-key auth from file** —
    `session.userauth_publickey_fromfile(user, pub_path,
-   priv_path, passphrase)`. Requires either the open() hang
-   above to be fixed, or a Python-side helper that reads the
-   file via MicroPython `open()` and calls the existing
-   `userauth_publickey(user, privkey_bytes)`.
+   priv_path, passphrase)`. Still unimplemented, but no longer
+   blocked on a mystery: file reading works wherever disk I/O
+   works (verified under DOSBox-X), so this is now ordinary
+   work — either bind the libssh2 call, or add a Python-side
+   helper that reads the file with MicroPython `open()` and
+   calls the existing `userauth_publickey(user, privkey_bytes)`.
+   On QEMU + FreeDOS it will inherit the item-2 disk wedge.
 
 4. **Document where SSH credentials live on DOS.** There's no
    `~/.ssh/` on DOS, so the conventions need to be spelled out:
@@ -250,15 +314,8 @@ the test passed.
    above), so document the build-time inlining pattern as the
    interim recipe until that's fixed.
 
-4. **Expose POSIX TCP_NODELAY in modlwip.** modlwip's `case
-   TCP_NODELAY:` switch matches on the lwIP `TF_NODELAY = 0x40`
-   constant, not POSIX `TCP_NODELAY = 1`. Currently nobody needs
-   to set NODELAY (SSHTEST works without it after the EOF→EAGAIN
-   fix), so the gap is cosmetic — but it'll bite anyone porting
-   a POSIX socket program. Upstream MicroPython fix: either
-   expose `socket.TCP_NODELAY` as a module constant equal to
-   `TF_NODELAY`, or translate POSIX 1 → TF_NODELAY inside the
-   setsockopt handler.
+   Written up in [`docs/library/ssh.md`](library/ssh.md) under
+   "Where credentials live on DOS".
 
 ## Run
 

@@ -128,10 +128,12 @@ typedef struct {
 // Set to 0 to fall back to the DPMI 0301h thunk path.
 static int dos_use_libc_io = 0;
 
-extern int  open(const char *path, int flags);
-extern int  read(int fd, void *buf, unsigned int n);
-extern int  close(int fd);
-extern long lseek(int fd, long off, int whence);
+// Declared at BLOCK scope in each user below, deliberately. uc386
+// compiles all 242 translation units into a single assembly output, so
+// a file-scope redeclaration of a libc name here is visible to the
+// whole program and can rebind it for every other TU. Keeping these
+// local is the difference between an experiment switch and a
+// program-wide symbol change.
 
 static unsigned int dos_int21_thunk_seg = 0;
 static unsigned int dos_int21_thunk_linear = 0;
@@ -532,6 +534,7 @@ static int dos_int21_call(dos_rmcs_t *rm) {
 int dos_int21_open(const char *path, int dos_access_mode, int *err_out) {
     if (err_out) *err_out = 0;
     if (dos_use_libc_io) {
+        extern int open(const char *path, int flags);
         // DOS access modes 0/1/2 coincide with O_RDONLY/O_WRONLY/O_RDWR.
         int fd = open(path, dos_access_mode & 3);
         if (fd < 0) { if (err_out) *err_out = 2; return -1; }
@@ -580,6 +583,52 @@ int dos_int21_open(const char *path, int dos_access_mode, int *err_out) {
     return (int)(rm.eax & 0xFFFF);
 }
 
+// `creat(path)` — INT 21h AH=0x3C (Create or Truncate File).
+//
+// AH=0x3D only opens files that already exist, so `open(path, "wb")`
+// could never create one. AH=0x3C creates the file if it is absent and
+// truncates it to zero if it is present, returning a read/write
+// handle either way — exactly Python's "w" semantics.
+//
+// CX is the DOS attribute word for a newly created file; 0 means a
+// normal file (not read-only, hidden or system).
+//
+// Append ("a") is this call's one gap: 0x3C always truncates, so the
+// caller creates-or-opens and then seeks to the end. See
+// uc386dos_builtin_open.
+int dos_int21_creat(const char *path, int *err_out) {
+    if (err_out) *err_out = 0;
+    if (dos_use_libc_io) {
+        extern int creat(const char *path, int mode);
+        int fd = creat(path, 0);
+        if (fd < 0) { if (err_out) *err_out = 5; return -1; }
+        return fd;
+    }
+    if (pktdrv_preallocated_bounce_seg == 0
+        || pktdrv_preallocated_bounce_linear == 0) {
+        return -1;
+    }
+    size_t plen = strlen(path);
+    if (plen >= 1024) return -1;
+
+    unsigned char *bp = (unsigned char *)pktdrv_preallocated_bounce_linear;
+    memcpy(bp, path, plen + 1);
+
+    dos_rmcs_t rm;
+    memset(&rm, 0, sizeof(rm));
+    rm.eax = 0x3C00;
+    rm.ecx = 0;                    // normal attributes
+    rm.ds  = (unsigned short)pktdrv_preallocated_bounce_seg;
+    rm.edx = 0;
+
+    if (dos_int21_call(&rm) != 0) return -1;
+    if (rm.flags & 1) {
+        if (err_out) *err_out = (int)(rm.eax & 0xFFFF);
+        return -1;
+    }
+    return (int)(rm.eax & 0xFFFF);
+}
+
 // `read(fd, buf, count)` — INT 21h AH=0x3F. count is clamped to the
 // bounce buffer size (~2 KB minus path scratch); callers that want
 // more should loop.
@@ -592,6 +641,7 @@ int dos_int21_open(const char *path, int dos_access_mode, int *err_out) {
 int dos_int21_read(int fd, void *buf, unsigned int count, int *err_out) {
     if (err_out) *err_out = 0;
     if (dos_use_libc_io) {
+        extern int read(int fd, void *buf, unsigned int n);
         int n = read(fd, buf, count);
         if (n < 0) { if (err_out) *err_out = 5; return -1; }
         return n;
@@ -662,6 +712,7 @@ int dos_int21_write(int fd, const void *buf, unsigned int count, int *err_out) {
 int dos_int21_close(int fd, int *err_out) {
     if (err_out) *err_out = 0;
     if (dos_use_libc_io) {
+        extern int close(int fd);
         return close(fd) < 0 ? -1 : 0;
     }
     dos_rmcs_t rm;
@@ -681,6 +732,7 @@ int dos_int21_close(int fd, int *err_out) {
 long dos_int21_lseek(int fd, long offset, int whence, int *err_out) {
     if (err_out) *err_out = 0;
     if (dos_use_libc_io) {
+        extern long lseek(int fd, long off, int whence);
         return lseek(fd, offset, whence);
     }
     dos_rmcs_t rm;

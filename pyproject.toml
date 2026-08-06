@@ -10,7 +10,12 @@ readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
 dependencies = [
-    "uc386>=0.1.3",
+    # 0.1.5 is the floor, not a preference: it is the first release whose
+    # DOS libc issues real INT 21h AH=0x3D / AH=0x3C for open/create.
+    # Earlier versions call dos_emu's private AH=0xA0, which does not
+    # exist on real DOS, so a build made with them produces an MP.EXE
+    # whose os.stat / os.path.* / shutil paths misbehave on hardware.
+    "uc386>=0.1.5",
 ]
 authors = [
     {name = "freedos_micro_python contributors"}

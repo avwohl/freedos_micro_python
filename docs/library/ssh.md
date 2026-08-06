@@ -173,10 +173,74 @@ Standard SFTP file ops.
   on the same connection.
 - `Session.close()` must be called before reconnecting; otherwise
   libssh2's session state leaks.
-- For pubkey auth from a file: see the
-  [bundled `sftp.py` workaround](../tools/sftp.md) — `open()`
-  after `import _ssh` empirically hangs in DPMI 0x0301 on PMODE/W
-  (qemu+FreeDOS). Inline the key bytes at build time instead.
+- For pubkey auth from a file, see "Where credentials live on
+  DOS" below.
+
+## Where credentials live on DOS
+
+DOS has no `$HOME` and no `~/.ssh/`, so the usual OpenSSH paths do
+not exist. There is also no fallback location built into this
+port — nothing is searched automatically. You pass paths
+explicitly, and the conventions below are what the examples and
+docs assume.
+
+**Recommended layout.** Put credentials in an `\SSH\` directory
+at the root of whatever drive you run from:
+
+```
+C:\SSH\ID_ED.KEY      private key   (OpenSSH format)
+C:\SSH\ID_ED.PUB      public key
+C:\SSH\KNOWN_H.TXT    known hosts
+```
+
+**8.3 names are mandatory.** FAT gives you eight characters plus a
+three-character extension, uppercased. The OpenSSH names do not
+survive:
+
+| OpenSSH | On DOS |
+|---|---|
+| `id_ed25519` | `ID_ED.KEY` |
+| `id_ed25519.pub` | `ID_ED.PUB` |
+| `known_hosts` | `KNOWN_H.TXT` |
+| `authorized_keys` | `AUTH_KEY.TXT` |
+
+Pick the names you like — nothing in the port depends on these —
+but write them the way DOS will actually store them. A file
+copied in as `id_ed25519` becomes something like `ID_ED25.519`,
+which is not what your script will be asking for.
+
+**Pointing the examples somewhere else.** `examples/scp.py` and
+`examples/sftp.py` take the path as an argument; there is no
+default and no search path. Give a full path including the drive
+letter if you are not running from the same drive.
+
+**Current status — read this before planning around it.** Only
+password auth is wired up. Public-key auth needs the RSA / key-
+parse implementations in `port/libssh2_axtls.c`, which are still
+stubs returning `-1` (docs/WIP.md item 1), and
+`userauth_publickey_fromfile` is not bound (item 3). So the table
+above is the convention to write *to*, not something the port
+reads today.
+
+**Interim recipe: inline the key at build time.** Until key
+loading lands, the working pattern — the one `rigs/ssh-rig` uses
+and passes with — is to substitute the key bytes into the script
+before it reaches DOS, rather than reading a file at runtime:
+
+```python
+# SSHTEST.PY carries a placeholder that the rig replaces:
+PRIVKEY = __CLIENT_KEY_BYTES__       # b"-----BEGIN OPENSSH..."
+session.userauth_publickey(user, PRIVKEY)
+```
+
+The rig renders that placeholder from the real key file on the
+build host, then copies the rendered script onto the disk image.
+See `rigs/ssh-rig/run-ssh-rig.sh`.
+
+Note this workaround exists because key *parsing* is missing, not
+because file reading is broken. Reading a key file works wherever
+disk I/O works — verified under DOSBox-X. On QEMU + FreeDOS it
+will hit the disk wedge in docs/WIP.md item 2.
 
 ## See also
 

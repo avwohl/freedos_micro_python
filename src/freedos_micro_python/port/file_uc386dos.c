@@ -37,6 +37,7 @@
 // same pattern that drives the Crynwr packet driver. The dos_int21_*
 // API in dosint21_uc386dos.c handles bounce-buffer copy in/out.
 extern int  dos_int21_open(const char *path, int dos_access_mode, int *err_out);
+extern int  dos_int21_creat(const char *path, int *err_out);
 extern int  dos_int21_read(int fd, void *buf, unsigned int count, int *err_out);
 extern int  dos_int21_write(int fd, const void *buf, unsigned int count, int *err_out);
 extern int  dos_int21_close(int fd, int *err_out);
@@ -245,12 +246,9 @@ static mp_obj_t uc386dos_builtin_open(size_t n_args, const mp_obj_t *args,
     if (n_args >= 2) {
         mode_s = mp_obj_str_get_str(args[1]);
     }
-    // DOS AH=0x3D access mode: 0=read, 1=write, 2=read-write. We
-    // don't yet support 'w' (truncate-create) or 'a' (append-create)
-    // through the thunk; those require AH=0x3C (create) or AH=0x6C
-    // (extended open w/ truncate). Plumb in a later cycle. For now
-    // map them to the closest read-write mode and rely on the open
-    // failing if the file doesn't already exist.
+    // DOS AH=0x3D access mode: 0=read, 1=write, 2=read-write.
+    // 'w' and 'a' additionally need the file to be created when it is
+    // absent, which AH=0x3D cannot do — see the dispatch below.
     int dos_mode = 0;
     int want_create = 0;
     int want_trunc  = 0;
@@ -265,9 +263,28 @@ static mp_obj_t uc386dos_builtin_open(size_t n_args, const mp_obj_t *args,
             case 't': type = &mp_type_uc386dos_textio; break;
         }
     }
-    (void)want_create; (void)want_trunc;     // TODO: AH=0x3C for create
     int err = 0;
-    int fd = dos_int21_open(fname, dos_mode, &err);
+    int fd;
+    if (want_trunc) {
+        // "w": create, or truncate an existing file. AH=0x3C does both
+        // and hands back a read/write handle.
+        fd = dos_int21_creat(fname, &err);
+    } else if (want_create) {
+        // "a": keep existing contents. Try to open first; only create
+        // when the file is genuinely absent, because AH=0x3C would
+        // truncate exactly what append is supposed to preserve.
+        fd = dos_int21_open(fname, dos_mode, &err);
+        if (fd < 0) {
+            fd = dos_int21_creat(fname, &err);
+        }
+        if (fd >= 0) {
+            // DOS opens at offset 0; append means start at EOF.
+            int seek_err = 0;
+            (void)dos_int21_lseek(fd, 0, 2 /* SEEK_END */, &seek_err);
+        }
+    } else {
+        fd = dos_int21_open(fname, dos_mode, &err);
+    }
     if (fd < 0) {
         // Report what actually went wrong. This used to raise ENOENT
         // unconditionally, which made a DPMI/thunk-level failure

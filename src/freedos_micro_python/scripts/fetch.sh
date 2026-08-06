@@ -240,27 +240,43 @@ patch_main_pktdrv_prealloc() {
             print "    unsigned int seg = regs[0] & 0xFFFF;"
             print "    pktdrv_preallocated_bounce_seg = seg;"
             print ""
-            print "    // PMODE/W uses paging — `seg << 4` is NOT the flat-32 linear"
-            print "    // address that maps the conventional memory at that real-mode"
-            print "    // segment. We need to ask DPMI for a selector that maps the"
-            print "    // segment, then read its linear base."
+            print "    // Resolve the flat-32 linear address that aliases this"
+            print "    // real-mode paragraph, via DPMI fn 0x0002 (segment ->"
+            print "    // descriptor) then fn 0x0006 (descriptor -> linear base)."
             print "    //"
             print "    //   DPMI fn 0x0002: allocate descriptor for real-mode segment"
             print "    //     in: AX=0x0002, BX=segment   out: AX=selector"
             print "    //   DPMI fn 0x0006: get selector base address"
             print "    //     in: AX=0x0006, BX=selector  out: CX=base_high, DX=base_low"
+            print "    //"
+            print "    // BOTH carry flags are checked. They used to be discarded, so a"
+            print "    // failed resolution left a wild address in the global and every"
+            print "    // dos_int21_* call wrote its path or data somewhere DOS never"
+            print "    // looks -- surfacing as a phantom file-not-found."
+            print "    //"
+            print "    // Measured on FreeDOS + PMODE/W: the DPMI answer and the plain"
+            print "    // seg << 4 identity mapping agree exactly (seg 0x3003 -> both"
+            print "    // give 0x30030), and the client flat base is 0. Conventional"
+            print "    // memory IS identity-mapped here, so seg << 4 is a sound"
+            print "    // fallback rather than a guess. (An earlier comment claimed the"
+            print "    // opposite; it was never true on this host.)"
+            print "    unsigned int linear = 0;"
             print "    unsigned int r2[8] = {0};"
             print "    r2[0] = 0x0002;"
             print "    r2[1] = seg;"
-            print "    pktdrv_int_invoke(0x31, r2);"
-            print "    unsigned int sel = r2[0] & 0xFFFF;"
-            print "    unsigned int r3[8] = {0};"
-            print "    r3[0] = 0x0006;"
-            print "    r3[1] = sel;"
-            print "    pktdrv_int_invoke(0x31, r3);"
-            print "    unsigned int base_high = r3[2] & 0xFFFF;   // CX"
-            print "    unsigned int base_low  = r3[3] & 0xFFFF;   // DX"
-            print "    pktdrv_preallocated_bounce_linear = (base_high << 16) | base_low;"
+            print "    if (!pktdrv_int_invoke(0x31, r2)) {"
+            print "        unsigned int sel = r2[0] & 0xFFFF;"
+            print "        unsigned int r3[8] = {0};"
+            print "        r3[0] = 0x0006;"
+            print "        r3[1] = sel;"
+            print "        if (!pktdrv_int_invoke(0x31, r3)) {"
+            print "            unsigned int base_high = r3[2] & 0xFFFF;   // CX"
+            print "            unsigned int base_low  = r3[3] & 0xFFFF;   // DX"
+            print "            linear = (base_high << 16) | base_low;"
+            print "        }"
+            print "    }"
+            print "    if (linear == 0) linear = seg << 4;"
+            print "    pktdrv_preallocated_bounce_linear = linear;"
             print ""
             print "    // Pre-allocate 5 paragraphs (80 bytes) for the INT 0x60 thunk."
             print "    // First 16 bytes are the INT 0x60 trampoline + type filter"
@@ -354,6 +370,149 @@ patch_main_pktdrv_prealloc() {
 # "thunk's" silently truncated patch_main_pktdrv_prealloc for months.
 # Do not reintroduce that pattern here.
 # Idempotent: keyed on the [mp-before-file] marker.
+# Accept the POSIX value of TCP_NODELAY in modlwip's setsockopt.
+#
+# modlwip does `#define TCP_NODELAY TF_NODELAY`, so its switch matches
+# lwIP's flag bit 0x40. POSIX (and every ported socket program) uses
+# TCP_NODELAY == 1, which falls through to the default arm and prints
+# "Warning: lwip.setsockopt() not implemented" while silently doing
+# nothing. 1 collides with nothing else handled here (SOF_REUSEADDR
+# 0x04, SOF_BROADCAST 0x20, TF_NODELAY 0x40, IP_ADD/DROP_MEMBERSHIP
+# 0x400/0x401), so it is safe to accept as an alias.
+#
+# The case body also has to stop passing `opt` as the flag, since for
+# the POSIX spelling `opt` is 1, not TF_NODELAY.
+# Idempotent: keyed on the POSIX marker comment.
+# uc386's preprocessor cannot expand a macro inside #include, so
+# `#include MICROPY_PY_TIME_INCLUDEFILE` fails with
+# "Invalid #include syntax". Both macros are defined in
+# mpconfigport.h and both target files exist in port/, so substitute
+# the literal name; `-I uc386-dos` is on the compile line, which is
+# how the bare filename resolves.
+#
+# These two edits (and the two float ones below) existed as hand
+# modifications in a working tree but were never captured here, so a
+# from-scratch `fetch` + `port` could not compile. Anyone following
+# docs/getting-started.md hit it immediately.
+# Idempotent: keyed on the substituted text.
+patch_macro_includefiles() {
+    for pair in "upstream/extmod/modtime.c:MICROPY_PY_TIME_INCLUDEFILE:modtime_uc386dos.c" \
+                "upstream/extmod/modmachine.c:MICROPY_PY_MACHINE_INCLUDEFILE:modmachine_uc386dos.c"; do
+        F="${pair%%:*}"
+        rest="${pair#*:}"
+        MACRO="${rest%%:*}"
+        TARGET="${rest#*:}"
+        if [ ! -f "$F" ]; then continue; fi
+        if grep -q "include \"$TARGET\"" "$F"; then continue; fi
+        if ! grep -q "include $MACRO" "$F"; then
+            echo "micropython: warn: $F macro include not found - skipping." >&2
+            continue
+        fi
+        echo "micropython: expanding $MACRO in $F (uc386 cannot macro-include) ..."
+        sed -i.bak "s|#include $MACRO|#include \"$TARGET\"|" "$F"
+        rm -f "$F.bak"
+    done
+}
+
+# uc386 has `long double` == `double`, so mp_large_float_t is not
+# actually wider than mp_float_t. Two upstream places assume it is:
+#   py/formatfloat.c  MAX_MANTISSA_DIGITS 19 assumes 80-bit mantissa
+#   py/parsenum.c     asserts sizeof(large) > sizeof(float)
+# Cap the digits at SAFE_MANTISSA_DIGITS and drop the assert.
+# Idempotent: keyed on the uc386 marker comments.
+patch_float_no_long_double() {
+    F="upstream/py/formatfloat.c"
+    if [ -f "$F" ] && ! grep -q "uc386: long double == double" "$F"; then
+        if grep -q "define MAX_MANTISSA_DIGITS  (19)" "$F"; then
+            echo "micropython: capping MAX_MANTISSA_DIGITS (uc386 long double == double) ..."
+            sed -i.bak \
+                "s|#define MAX_MANTISSA_DIGITS  (19)|#define MAX_MANTISSA_DIGITS  (16)  // uc386: long double == double, cap at SAFE|" \
+                "$F"
+            rm -f "$F.bak"
+        else
+            echo "micropython: warn: formatfloat MAX_MANTISSA_DIGITS shape changed - skipping." >&2
+        fi
+    fi
+
+    F="upstream/py/parsenum.c"
+    if [ -f "$F" ] && ! grep -q "uc386: removed" "$F"; then
+        if grep -q "assert(sizeof(mp_large_float_t) > sizeof(mp_float_t));" "$F"; then
+            echo "micropython: dropping mp_large_float_t assert (uc386 long double == double) ..."
+            sed -i.bak \
+                "s|assert(sizeof(mp_large_float_t) > sizeof(mp_float_t));|/* uc386: removed — long double == double, see mpconfigport.h */|" \
+                "$F"
+            rm -f "$F.bak"
+        else
+            echo "micropython: warn: parsenum assert shape changed - skipping." >&2
+        fi
+    fi
+}
+
+patch_modlwip_posix_nodelay() {
+    F="upstream/extmod/modlwip.c"
+    if [ ! -f "$F" ]; then return 0; fi
+    if grep -q "POSIX TCP_NODELAY" "$F"; then
+        return 0
+    fi
+    if ! grep -q "case TCP_NODELAY: {" "$F"; then
+        echo "micropython: warn: modlwip TCP_NODELAY case not found - skipping." >&2
+        return 0
+    fi
+    echo "micropython: accepting POSIX TCP_NODELAY (1) in modlwip setsockopt ..."
+    sed -i.bak \
+        -e 's|case TCP_NODELAY: {|case TCP_NODELAY:\
+        case 1: {   /* POSIX TCP_NODELAY = 1; lwIP uses TF_NODELAY */|' \
+        -e 's|tcp_set_flags(socket->pcb.tcp, opt);|tcp_set_flags(socket->pcb.tcp, TF_NODELAY);|' \
+        -e 's|tcp_clear_flags(socket->pcb.tcp, opt);|tcp_clear_flags(socket->pcb.tcp, TF_NODELAY);|' \
+        "$F"
+    rm -f "$F.bak"
+}
+
+# Initialise the stack guard and sys.argv around mp_init().
+#
+# Upstream's minimal port does none of this: it calls mp_init() bare.
+# Without mp_stack_ctrl_init() the stack-limit check in py/stackctrl.c
+# compares against uninitialised state, so the first real call depth
+# check misfires and the interpreter wedges — observed as the REPL
+# echoing input and then hanging on the first print(). Without the
+# mp_obj_list_init() the sys.argv list object is never constructed,
+# which matters now that patch_main_argv_script appends to it.
+#
+# 0xC0000 (768 KB) matches the PM stack the harness gives the client.
+#
+# Like the macro-include and long-double edits, this existed only as a
+# hand modification in a working tree and was lost the moment anyone
+# re-fetched upstream. Captured here so a from-scratch build works.
+# Idempotent: keyed on mp_stack_set_limit.
+patch_main_stack_and_argv_init() {
+    F="upstream/ports/minimal/main.c"
+    if [ ! -f "$F" ]; then return 0; fi
+    if grep -q "mp_stack_set_limit" "$F"; then
+        return 0
+    fi
+    if ! grep -q "^    mp_init();" "$F"; then
+        echo "micropython: warn: main.c mp_init() call not found - skipping stack/argv init." >&2
+        return 0
+    fi
+    echo "micropython: adding mp_stack_ctrl_init + sys.argv init around mp_init() ..."
+    cat > "$F.initins" <<'INITEOF'
+    mp_stack_ctrl_init();
+    mp_stack_set_limit(0xC0000);
+    mp_init();
+    mp_obj_list_init((mp_obj_list_t *)&MP_STATE_VM(mp_sys_argv_obj), 0);
+INITEOF
+    awk -v insfile="$F.initins" '
+        /^    mp_init\(\);$/ && !done {
+            while ((getline line < insfile) > 0) print line
+            close(insfile)
+            done = 1
+            next
+        }
+        { print }
+    ' "$F" > "$F.tmp" && mv "$F.tmp" "$F"
+    rm -f "$F.initins"
+}
+
 patch_main_argv_script() {
     F="upstream/ports/minimal/main.c"
     if [ ! -f "$F" ]; then return 0; fi
@@ -1052,16 +1211,27 @@ fetch_tweetnacl() {
     done
 }
 
-if [ -d upstream ]; then
-    echo "micropython: upstream/ already present — skipping main fetch."
+# Every fetch_* / patch_* step, in order. Called from BOTH the
+# "upstream/ already present" path and the fresh-fetch path.
+#
+# This used to be two hand-maintained copies of the same list, which
+# drifted: the fresh-fetch copy was missing patch_libssh2_scp_int64_format,
+# so a clean checkout silently built without it, and a newly added patch
+# did nothing unless someone remembered to register it twice. One list,
+# called twice.
+apply_all_patches() {
     fetch_b_con_crypto
     fetch_lwip
     fetch_axtls
     fetch_libssh2
     fetch_tweetnacl
+    patch_macro_includefiles
+    patch_float_no_long_double
     patch_modlwip_loopback_poll
+    patch_modlwip_posix_nodelay
     patch_main_startup_markers
     patch_main_pktdrv_prealloc
+    patch_main_stack_and_argv_init
     patch_main_argv_script
     patch_main_disable_fs_stubs
     patch_axtls_config_verify
@@ -1080,6 +1250,11 @@ if [ -d upstream ]; then
     patch_libssh2_scp_int64_format
     patch_tweetnacl_uc386dos
     patch_mp_scope_qstr_qstr
+}
+
+if [ -d upstream ]; then
+    echo "micropython: upstream/ already present — skipping main fetch."
+    apply_all_patches
     exit 0
 fi
 
@@ -1099,28 +1274,4 @@ tar -xzf "$TMP/micropython.tar.gz" -C "$TMP"
 mv "$TMP"/micropython-* upstream
 echo "micropython: upstream tree at $(pwd)/upstream/"
 
-fetch_b_con_crypto
-fetch_lwip
-fetch_axtls
-fetch_libssh2
-fetch_tweetnacl
-patch_modlwip_loopback_poll
-patch_main_startup_markers
-patch_main_pktdrv_prealloc
-patch_main_argv_script
-patch_main_disable_fs_stubs
-patch_axtls_config_verify
-patch_axtls_endian_include
-patch_axtls_get_random_dos_int21
-patch_axtls_time_dos_int21
-patch_axtls_x509_gettimeofday
-patch_axtls_handshake_markers
-patch_libssh2_crypto_dispatch
-patch_libssh2_callback_macros
-patch_libssh2_bsd_types
-patch_libssh2_sftp_handle_enum
-patch_libssh2_crypto_engine_enum
-patch_libssh2_kex_ecsha_macro_hoist
-patch_libssh2_wait_socket
-patch_tweetnacl_uc386dos
-patch_mp_scope_qstr_qstr
+apply_all_patches

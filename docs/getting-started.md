@@ -38,6 +38,44 @@ The 30-minute `port` step is doing a from-scratch C compile of
 TweetNaCl + crypto-algorithms + our port glue) through uc386's
 C23 frontend. There's no incremental rebuild — it's all or nothing.
 
+## 1a. Running a program
+
+```
+MP.EXE SCRIPT.PY [args ...]
+```
+
+runs `SCRIPT.PY` and exits, putting the remaining words in
+`sys.argv`. Exit status is 0, or 1 on an uncaught exception. With no
+argument you get the interactive REPL.
+
+To run a program without any file on disk, paste it into the REPL:
+press `Ctrl-E`, paste the text, then `Ctrl-D` to execute. Multi-line
+definitions work; this is the standard MicroPython paste mode.
+
+> **Environment caveat.** File access is verified working under
+> DOSBox-X. Under QEMU + FreeDOS, any DOS call that touches a
+> physical sector currently hangs, so `MP.EXE SCRIPT.PY`, `open()`
+> and `import` of a `.py` file will hang there. Paste mode never
+> touches the disk and works everywhere. The evidence, and the
+> causes already ruled out, are in [`WIP.md`](WIP.md) item 2.
+
+## Integers are 64-bit
+
+This build uses MicroPython's `objint_longlong` implementation, not
+arbitrary-precision `mpz`. Integers are signed 64-bit:
+
+```python
+>>> 2**62
+4611686018427387904
+>>> 2**64
+Traceback (most recent call last):
+  File "<stdin>", line 1, in <module>
+OverflowError: result overflows long long storage
+```
+
+If you are porting code that relies on CPython-style unbounded
+integers, that is the boundary to watch.
+
 ## 2. Getting MP.EXE onto your DOS system
 
 ### Real DOS hardware
@@ -125,7 +163,17 @@ import sys
 print('python:', sys.implementation.name)
 ```
 
-Run it by redirecting it into `MP.EXE`'s stdin:
+Run it directly:
+
+```
+A:\> MP.EXE HELLO.PY
+hello from DOS
+4
+python: micropython
+```
+
+Or redirect it into `MP.EXE`'s stdin, which drives the REPL and so
+echoes the prompts (and needs no argv support):
 
 ```
 A:\> MP.EXE < HELLO.PY

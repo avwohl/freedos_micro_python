@@ -84,6 +84,30 @@ regression tests and as usable standalone tools — drop them into a
 DOS image (or run them in the REPL) and they work end-to-end against
 real servers.
 
+### Running a program
+
+```
+MP.EXE SCRIPT.PY [args ...]
+```
+
+runs `SCRIPT.PY` and exits; the remaining words land in `sys.argv`.
+Exit status is 0, or 1 on an uncaught exception. With no argument
+`MP.EXE` starts the interactive REPL.
+
+You can also paste a program straight into the REPL: press `Ctrl-E`,
+paste, then `Ctrl-D`. This needs no file at all, which makes it the
+reliable option in the environment noted below.
+
+> **Reading files from disk depends on your environment.** Verified
+> working under DOSBox-X: `MP.EXE SCRIPT.PY`, `open()`, `read()`,
+> `import` of a `.py`. Under **QEMU + FreeDOS** any DOS call that
+> touches a physical sector currently hangs, which takes
+> `MP.EXE SCRIPT.PY` and `open()` with it — see
+> [`docs/WIP.md`](docs/WIP.md) item 2 for the evidence and what is
+> ruled out. Paste mode is unaffected because it never touches the
+> disk. The examples below therefore run today under DOSBox-X; on
+> QEMU + FreeDOS they will hang on their first file access.
+
 - **[`examples/wget.py`](examples/wget.py)** — HTTPS streaming
   downloader. Built on `socket` (lwIP-backed) and `ssl` (axtls
   CERT_REQUIRED supported via `--ca-certs`). Streams in 4 KB chunks

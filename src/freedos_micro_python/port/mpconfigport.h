@@ -367,6 +367,12 @@ extern void sys_check_timeouts(void);
 
 typedef long mp_off_t;
 
+// `sys.platform`. modsys.c gates this on #ifdef, not on a 0/1 value,
+// so leaving it undefined is what made `sys.platform` absent while
+// `sys.implementation.name` worked. CPython reports "win32"/"linux"
+// here; DOS ports conventionally report "dos".
+#define MICROPY_PY_SYS_PLATFORM "dos"
+
 #define MICROPY_HW_BOARD_NAME "uc386-dos"
 #define MICROPY_HW_MCU_NAME   "i386"
 
