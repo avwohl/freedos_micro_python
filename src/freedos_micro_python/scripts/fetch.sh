@@ -297,7 +297,7 @@ patch_main_pktdrv_prealloc() {
             print "    }"
             print "}"
             print ""
-            print "// Resolve the INT 21h thunk's linear address + write the"
+            print "// Resolve the INT 21h thunk'\''s linear address + write the"
             print "// `CD 21 CB` opcode bytes there NOW, while the stack is"
             print "// shallow. Mirrors `_preallocate_bounce_buffer`'\''s rationale:"
             print "// PMODE/W'\''s DPMI lookup paths have shown deep-stack"
