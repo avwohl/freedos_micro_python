@@ -108,6 +108,23 @@ typedef struct {
 static unsigned int dos_int21_thunk_seg = 0;
 static int dos_int21_thunk_ready = 0;
 
+// Real-mode stack for the INT 21h call, allocated once at startup.
+//
+// dos_int21_call used to leave ss:sp = 0:0 in the register block,
+// which tells the DPMI host to supply a real-mode stack of its own.
+// PMODE/W's is small and shared. AH=0x3F / AH=0x40 against an
+// already-open console handle barely touch it — which is exactly why
+// printing and the REPL work — but AH=0x3D walks the FAT directory
+// chain and drops into BIOS INT 13h on a floppy, which is far
+// hungrier. Overflowing the host's stack corrupts whatever sits below
+// it and produces precisely what we see: no fault, no return, and a
+// failure that depends on timing and on which media is being touched.
+//
+// 256 paragraphs = 4 KB, which is comfortably more than a DOS file
+// open plus a BIOS disk call needs.
+static unsigned int dos_rm_stack_seg = 0;
+static unsigned int dos_rm_stack_bytes = 0;
+
 static int dos_int21_thunk_init(void) {
     if (dos_int21_thunk_ready) return 0;
     if (dos_int21_preallocated_thunk_seg == 0) return -1;
@@ -218,9 +235,40 @@ static void dos_dbg_hex(const char *label, unsigned int v) {
 // while dos_int21_open assumed the bounce is "identity-mapped by the
 // extender". Rather than pick a side, resolve both, cross-check, and
 // log what was chosen so the serial log settles it.
+// Base of our own flat data selector, per DPMI fn 0x0006.
+//
+// DPMI 0x0002/0x0006 report ABSOLUTE linear addresses. A pointer this
+// code dereferences is an offset inside the client's flat segment.
+// The two coincide only when the client base is zero. If PMODE/W
+// gives us a non-zero base, then casting the absolute address of a
+// conventional-memory paragraph to a pointer addresses
+// base + that_address instead — landing inside our own image, so we
+// scribble on ourselves while real mode reads an untouched paragraph.
+// That would explain both the nondeterministic wedges and DOS
+// answering "file not found" for a file that exists.
+extern unsigned int dos_get_ds_selector(void);
+void dos_int21_thunk_preinit(void);   // fwd decl: used as a text address below
+
+static unsigned int dos_client_base(void) {
+    unsigned int r[8] = {0};
+    r[R_EAX] = 0x0006;
+    r[R_EBX] = dos_get_ds_selector();
+    if (pktdrv_int_invoke(0x31, r)) return 0;
+    return ((r[R_ECX] & 0xFFFF) << 16) | (r[R_EDX] & 0xFFFF);
+}
+
 static int dos_bounce_resolve(void) {
     unsigned int seg = pktdrv_preallocated_bounce_seg;
     if (seg == 0) return -1;
+
+    // Where does this program actually live, and what is our base?
+    // Printed unconditionally: these four numbers decide whether the
+    // absolute-vs-relative bug above is real, and there is no other
+    // way to find out on hardware.
+    dos_dbg_hex("[client:dssel]", dos_get_ds_selector());
+    dos_dbg_hex("[client:dsbase]", dos_client_base());
+    dos_dbg_hex("[addr:bss]", (unsigned int)(void *)&dos_int21_thunk_seg);
+    dos_dbg_hex("[addr:text]", (unsigned int)(void *)&dos_int21_thunk_preinit);
 
     unsigned int linear_shift = seg << 4;
     unsigned int linear_dpmi = 0;
@@ -255,6 +303,22 @@ static int dos_bounce_resolve(void) {
         chosen = linear_shift;
     }
 
+    // Translate the absolute linear address into an offset within our
+    // own flat segment. A zero base leaves this untouched, which is
+    // the historical behaviour; a non-zero base is precisely the bug
+    // described above. Underflow would mean conventional memory sits
+    // below our segment base and simply is not reachable through DS —
+    // report rather than fabricate a pointer.
+    unsigned int base = dos_client_base();
+    if (base != 0) {
+        if (chosen < base) {
+            dos_dbg_hex("[bounce:BELOW-BASE]", base);
+            return -1;
+        }
+        chosen -= base;
+        dos_dbg_hex("[bounce:rebased]", chosen);
+    }
+
     // Writable-and-readable only proves the memory exists, not that it
     // aliases the paragraph — but a failure here is decisive.
     volatile unsigned char *b = (volatile unsigned char *)chosen;
@@ -279,6 +343,34 @@ void dos_int21_thunk_preinit(void) {
     if (dos_bounce_resolve() != 0) {
         write(1, "[bounce:RESOLVE-FAILED]\n", 24);
     }
+
+    // Allocate the real-mode stack now, at main()'s shallow stack,
+    // for the same reason everything else here is pre-allocated:
+    // DPMI 0x0100 from a deep interpreter stack is unreliable under
+    // PMODE/W.
+    // Ask for the biggest block we can get, backing off on refusal.
+    // A 1.44 MB FreeDOS boot with COMMAND.COM resident does not leave
+    // much conventional memory once the bounce (2 KB) and two thunk
+    // paragraphs are taken, and a flat request for 4 KB is refused
+    // outright — which silently left this feature disabled.
+    {
+        static const unsigned int paras[] = {256u, 128u, 64u, 32u};
+        for (unsigned int i = 0; i < 4; i++) {
+            unsigned int r[8] = {0};
+            r[R_EAX] = 0x0100;
+            r[R_EBX] = paras[i];
+            if (!pktdrv_int_invoke(0x31, r)) {
+                dos_rm_stack_seg = r[R_EAX] & 0xFFFF;
+                dos_rm_stack_bytes = paras[i] * 16u;
+                dos_dbg_hex("[i21stack:seg]", dos_rm_stack_seg);
+                dos_dbg_hex("[i21stack:bytes]", dos_rm_stack_bytes);
+                break;
+            }
+        }
+        if (dos_rm_stack_seg == 0) {
+            write(1, "[i21stack:ALLOC-FAILED]\n", 24);
+        }
+    }
     if (dos_int21_thunk_init() == 0) {
         write(1, "[i21thunk:armed]\n", 17);
     } else {
@@ -300,10 +392,20 @@ extern unsigned char dpmi0301_call_shallow(void *rmcs);
 // of rm is updated with the post-INT register state.
 static int dos_int21_call(dos_rmcs_t *rm) {
     if (dos_int21_thunk_init() != 0) return -1;
+    extern int write(int fd, const void *buf, unsigned int n);
     rm->cs = (unsigned short)dos_int21_thunk_seg;
     rm->ip = 0;
-    rm->ss = 0;
-    rm->sp = 0;
+    // Point the real-mode call at our own stack when we have one, and
+    // only fall back to ss:sp = 0:0 (host-supplied) if the allocation
+    // failed. sp starts two bytes below the top so a push cannot wrap
+    // the segment.
+    if (dos_rm_stack_seg != 0) {
+        rm->ss = (unsigned short)dos_rm_stack_seg;
+        rm->sp = (unsigned short)(dos_rm_stack_bytes - 2);
+    } else {
+        rm->ss = 0;
+        rm->sp = 0;
+    }
     // Enter the real-mode INT 21h with interrupts ENABLED. The rmcs
     // is memset to 0 by every caller, which left IF clear. FreeDOS's
     // INT 21h does STI early so it usually recovers, but a
@@ -311,7 +413,13 @@ static int dos_int21_call(dos_rmcs_t *rm) {
     // IRQ 6 — with IF clear that wait never completes.
     // 0x0202 = IF | the x86 always-set bit 1.
     rm->flags = 0x0202;
-    return dpmi0301_call_shallow(rm) ? -1 : 0;
+    // Bracket the gate. Without these, a wedge inside PMODE/W's 0301h
+    // handler is indistinguishable from a wedge anywhere else in the
+    // call — the difference decides where to look next.
+    write(1, "[i21:call]\n", 11);
+    unsigned char cf = dpmi0301_call_shallow(rm);
+    write(1, "[i21:ret]\n", 10);
+    return cf ? -1 : 0;
 }
 
 // ------ public API -------------------------------------------------
