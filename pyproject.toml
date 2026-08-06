@@ -10,12 +10,18 @@ readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
 dependencies = [
-    # 0.1.5 is the floor, not a preference: it is the first release whose
-    # DOS libc issues real INT 21h AH=0x3D / AH=0x3C for open/create.
-    # Earlier versions call dos_emu's private AH=0xA0, which does not
-    # exist on real DOS, so a build made with them produces an MP.EXE
-    # whose os.stat / os.path.* / shutil paths misbehave on hardware.
-    "uc386>=0.1.5",
+    # TEMPORARY: this wants to be >=0.1.5, and should be raised back the
+    # moment uc386 0.1.5 reaches PyPI.
+    #
+    # 0.1.5 is the first release whose DOS libc issues real INT 21h
+    # AH=0x3D / AH=0x3C for open and create. Earlier versions call
+    # dos_emu's private AH=0xA0, which does not exist on real DOS, so an
+    # MP.EXE built against them misbehaves in os.stat / os.path.* /
+    # shutil on hardware. The uc386 0.1.5 release exists on GitHub but
+    # its PyPI publish never ran (GitHub Actions major outage,
+    # 2026-08-06), so pinning >=0.1.5 here would make this package
+    # unresolvable from PyPI.
+    "uc386>=0.1.4",
 ]
 authors = [
     {name = "freedos_micro_python contributors"}
