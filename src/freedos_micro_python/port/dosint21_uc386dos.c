@@ -47,6 +47,29 @@
 
 #include "py/runtime.h"
 
+// Per-call tracing of the DOS/DPMI path. Off by default: with it on,
+// every INT 21h prints markers, which is invaluable while debugging
+// this layer and pure noise in a shipped binary (it interleaves with
+// program output on the same stdout).
+//
+// Set to 1 to get: [i21:call]/[i21:ret] around the DPMI 0301h gate,
+// the resolved bounce/thunk/stack segments, the client selector base,
+// and the filename bytes handed to AH=0x3D.
+#ifndef DOS_INT21_DEBUG
+#define DOS_INT21_DEBUG 0
+#endif
+
+#if DOS_INT21_DEBUG
+#define DOS_DBG_HEX(label, v)  dos_dbg_hex((label), (unsigned int)(v))
+#define DOS_DBG_STR(s, n)      do { \
+        extern int write(int fd, const void *buf, unsigned int n_); \
+        write(1, (s), (n)); \
+    } while (0)
+#else
+#define DOS_DBG_HEX(label, v)  ((void)0)
+#define DOS_DBG_STR(s, n)      ((void)0)
+#endif
+
 // ------ externs from pktdrv_uc386dos.c -----------------------------
 // We reuse the same DPMI plumbing the packet driver does so we don't
 // duplicate the asm wrapper or the rmcs layout. pktdrv_int_invoke is
@@ -240,6 +263,7 @@ static int dos_int21_thunk_init(void) {
 // Emit "<label>=XXXXXXXX\n" so the serial log carries real values.
 // There is no printf on this path and no debugger on real hardware,
 // and every interesting quantity here is an address.
+#if DOS_INT21_DEBUG
 static void dos_dbg_hex(const char *label, unsigned int v) {
     extern int write(int fd, const void *buf, unsigned int n);
     static const char hexd[] = "0123456789abcdef";
@@ -251,6 +275,7 @@ static void dos_dbg_hex(const char *label, unsigned int v) {
     buf[n++] = '\n';
     write(1, buf, n);
 }
+#endif
 
 // Establish the flat-32 linear address that aliases the real-mode
 // bounce paragraph, and prove it before anything relies on it.
@@ -297,10 +322,10 @@ static int dos_bounce_resolve(void) {
     // Printed unconditionally: these four numbers decide whether the
     // absolute-vs-relative bug above is real, and there is no other
     // way to find out on hardware.
-    dos_dbg_hex("[client:dssel]", dos_get_ds_selector());
-    dos_dbg_hex("[client:dsbase]", dos_client_base());
-    dos_dbg_hex("[addr:bss]", (unsigned int)(void *)&dos_int21_thunk_seg);
-    dos_dbg_hex("[addr:text]", (unsigned int)(void *)&dos_int21_thunk_preinit);
+    DOS_DBG_HEX("[client:dssel]", dos_get_ds_selector());
+    DOS_DBG_HEX("[client:dsbase]", dos_client_base());
+    DOS_DBG_HEX("[addr:bss]", (unsigned int)(void *)&dos_int21_thunk_seg);
+    DOS_DBG_HEX("[addr:text]", (unsigned int)(void *)&dos_int21_thunk_preinit);
 
     unsigned int linear_shift = seg << 4;
     unsigned int linear_dpmi = 0;
@@ -319,10 +344,10 @@ static int dos_bounce_resolve(void) {
         }
     }
 
-    dos_dbg_hex("[bounce:seg]", seg);
-    dos_dbg_hex("[bounce:shift]", linear_shift);
-    dos_dbg_hex("[bounce:dpmi]", linear_dpmi);
-    dos_dbg_hex("[bounce:main]", pktdrv_preallocated_bounce_linear);
+    DOS_DBG_HEX("[bounce:seg]", seg);
+    DOS_DBG_HEX("[bounce:shift]", linear_shift);
+    DOS_DBG_HEX("[bounce:dpmi]", linear_dpmi);
+    DOS_DBG_HEX("[bounce:main]", pktdrv_preallocated_bounce_linear);
 
     // Prefer an address the two methods agree on; otherwise take the
     // one backed by a successful DPMI resolution. seg << 4 is the
@@ -344,11 +369,11 @@ static int dos_bounce_resolve(void) {
     unsigned int base = dos_client_base();
     if (base != 0) {
         if (chosen < base) {
-            dos_dbg_hex("[bounce:BELOW-BASE]", base);
+            DOS_DBG_HEX("[bounce:BELOW-BASE]", base);
             return -1;
         }
         chosen -= base;
-        dos_dbg_hex("[bounce:rebased]", chosen);
+        DOS_DBG_HEX("[bounce:rebased]", chosen);
     }
 
     // Writable-and-readable only proves the memory exists, not that it
@@ -356,12 +381,12 @@ static int dos_bounce_resolve(void) {
     volatile unsigned char *b = (volatile unsigned char *)chosen;
     b[0] = 0x55; b[1] = 0xAA;
     if (b[0] != 0x55 || b[1] != 0xAA) {
-        dos_dbg_hex("[bounce:UNWRITABLE]", chosen);
+        DOS_DBG_HEX("[bounce:UNWRITABLE]", chosen);
         return -1;
     }
 
     pktdrv_preallocated_bounce_linear = chosen;
-    dos_dbg_hex("[bounce:chosen]", chosen);
+    DOS_DBG_HEX("[bounce:chosen]", chosen);
     return 0;
 }
 
@@ -373,7 +398,7 @@ void dos_int21_thunk_preinit(void) {
     // hardware, where there is no debugger.
     extern int write(int fd, const void *buf, unsigned int n);
     if (dos_bounce_resolve() != 0) {
-        write(1, "[bounce:RESOLVE-FAILED]\n", 24);
+        DOS_DBG_STR("[bounce:RESOLVE-FAILED]\n", 24);
     }
 
     // Allocate the real-mode stack now, at main()'s shallow stack,
@@ -394,25 +419,24 @@ void dos_int21_thunk_preinit(void) {
             if (!pktdrv_int_invoke(0x31, r)) {
                 dos_rm_stack_seg = r[R_EAX] & 0xFFFF;
                 dos_rm_stack_bytes = paras[i] * 16u;
-                dos_dbg_hex("[i21stack:seg]", dos_rm_stack_seg);
-                dos_dbg_hex("[i21stack:bytes]", dos_rm_stack_bytes);
+                DOS_DBG_HEX("[i21stack:seg]", dos_rm_stack_seg);
+                DOS_DBG_HEX("[i21stack:bytes]", dos_rm_stack_bytes);
                 break;
             }
         }
         if (dos_rm_stack_seg == 0) {
-            write(1, "[i21stack:ALLOC-FAILED]\n", 24);
+            DOS_DBG_STR("[i21stack:ALLOC-FAILED]\n", 24);
         }
 
         // Dump every conventional-memory block we hold, so an overlap
         // is visible rather than inferred. A real-mode stack that
         // spans a thunk paragraph would corrupt the thunk the moment
         // DOS or an IRQ pushes onto it.
-        dos_dbg_hex("[seg:bounce]", pktdrv_preallocated_bounce_seg);
-        dos_dbg_hex("[seg:pktthunk]", pktdrv_preallocated_thunk_seg);
-        dos_dbg_hex("[seg:i21thunk]", dos_int21_preallocated_thunk_seg);
-        dos_dbg_hex("[seg:i21stack]", dos_rm_stack_seg);
-        dos_dbg_hex("[seg:i21stacktop]",
-                    dos_rm_stack_seg + (dos_rm_stack_bytes >> 4));
+        DOS_DBG_HEX("[seg:bounce]", pktdrv_preallocated_bounce_seg);
+        DOS_DBG_HEX("[seg:pktthunk]", pktdrv_preallocated_thunk_seg);
+        DOS_DBG_HEX("[seg:i21thunk]", dos_int21_preallocated_thunk_seg);
+        DOS_DBG_HEX("[seg:i21stack]", dos_rm_stack_seg);
+        DOS_DBG_HEX("[seg:i21stacktop]", dos_rm_stack_seg + (dos_rm_stack_bytes >> 4));
 
         if (dos_rm_stack_seg != 0 && dos_int21_preallocated_thunk_seg != 0) {
             unsigned int lo = dos_rm_stack_seg;
@@ -420,12 +444,12 @@ void dos_int21_thunk_preinit(void) {
             unsigned int th = dos_int21_preallocated_thunk_seg;
             unsigned int pk = pktdrv_preallocated_thunk_seg;
             if ((th >= lo && th < hi) || (pk >= lo && pk < hi)) {
-                write(1, "[seg:OVERLAP]\n", 14);
+                DOS_DBG_STR("[seg:OVERLAP]\n", 14);
             }
         }
     }
     if (dos_int21_thunk_init() == 0) {
-        write(1, "[i21thunk:armed]\n", 17);
+        DOS_DBG_STR("[i21thunk:armed]\n", 17);
         // Bidirectional mapping proof. Everything so far only shows we
         // can write the bounce and read our own write back — that is
         // true of ANY writable memory. What matters is whether real
@@ -446,12 +470,12 @@ void dos_int21_thunk_preinit(void) {
             (void)dos_int21_call(&rm);
             unsigned int w = ((unsigned int)b[0] << 24) | ((unsigned int)b[1] << 16)
                            | ((unsigned int)b[2] << 8)  | (unsigned int)b[3];
-            dos_dbg_hex("[map:after47]", w);
+            DOS_DBG_HEX("[map:after47]", w);
             // 0xEEEEEEEE means DOS did not touch our buffer.
         }
 
     } else {
-        write(1, "[i21thunk:FAILED]\n", 18);
+        DOS_DBG_STR("[i21thunk:FAILED]\n", 18);
     }
 }
 
@@ -503,10 +527,10 @@ static int dos_int21_call(dos_rmcs_t *rm) {
         volatile unsigned char *t =
             (volatile unsigned char *)dos_int21_thunk_linear;
         if (t[0] != 0xCD || t[1] != 0x21 || t[2] != 0xCB) {
-            write(1, "[i21:THUNK-CLOBBERED]\n", 22);
-            dos_dbg_hex("[i21:t0]", t[0]);
-            dos_dbg_hex("[i21:t1]", t[1]);
-            dos_dbg_hex("[i21:t2]", t[2]);
+            DOS_DBG_STR("[i21:THUNK-CLOBBERED]\n", 22);
+            DOS_DBG_HEX("[i21:t0]", t[0]);
+            DOS_DBG_HEX("[i21:t1]", t[1]);
+            DOS_DBG_HEX("[i21:t2]", t[2]);
             t[0] = 0xCD; t[1] = 0x21; t[2] = 0xCB;
         }
     }
@@ -515,9 +539,9 @@ static int dos_int21_call(dos_rmcs_t *rm) {
     // Bracket the gate. Without these, a wedge inside PMODE/W's 0301h
     // handler is indistinguishable from a wedge anywhere else in the
     // call — the difference decides where to look next.
-    write(1, "[i21:call]\n", 11);
+    DOS_DBG_STR("[i21:call]\n", 11);
     unsigned char cf = dpmi0301_call_shallow(rm);
-    write(1, "[i21:ret]\n", 10);
+    DOS_DBG_STR("[i21:ret]\n", 10);
     return cf ? -1 : 0;
 }
 
@@ -571,8 +595,8 @@ int dos_int21_open(const char *path, int dos_access_mode, int *err_out) {
                         | ((unsigned int)chk[2] << 8)  | (unsigned int)chk[3];
         unsigned int w1 = ((unsigned int)chk[4] << 24) | ((unsigned int)chk[5] << 16)
                         | ((unsigned int)chk[6] << 8)  | (unsigned int)chk[7];
-        dos_dbg_hex("[open:name0]", w0);
-        dos_dbg_hex("[open:name4]", w1);
+        DOS_DBG_HEX("[open:name0]", w0);
+        DOS_DBG_HEX("[open:name4]", w1);
     }
 
     if (dos_int21_call(&rm) != 0) return -1;
