@@ -72,6 +72,9 @@ extern unsigned int pktdrv_preallocated_bounce_linear;
 // fills this global at startup or leaves it 0 on alloc failure.
 extern unsigned int dos_int21_preallocated_thunk_seg;
 
+// The INT 0x60 (packet driver) thunk paragraph, for the overlap check.
+extern unsigned int pktdrv_preallocated_thunk_seg;
+
 // rmcs layout matches DPMI 0.9. Mirror pktdrv's typedef so we don't
 // have to pull its header (which doesn't exist; the struct is local
 // to pktdrv_uc386dos.c). Field-for-field equal — verified by the
@@ -105,7 +108,33 @@ typedef struct {
 #define R_DS  6
 #define R_ES  7
 
+// Route file I/O through the extender's own INT 21h translation
+// instead of our DPMI 0301h real-mode thunk.
+//
+// Measured: the thunk is NOT the problem. Reading the NUL device
+// through it works perfectly (open, AH=0x3F read, close all return),
+// and DOS AH=0x47 writes into our bounce and we read it back, so the
+// gate and the shared buffer are both sound. What wedges is anything
+// that touches the physical disk: the floppy BIOS (INT 13h) waits on
+// IRQ 6, and that interrupt is not delivered while we are inside the
+// host's real-mode call — so the wait never completes.
+//
+// PMODE/W's own INT 21h translation does the mode switching properly;
+// that path has always worked for console I/O (every print goes
+// through libc write() -> raw INT 21h AH=0x40). Now that libc's
+// _open issues a real AH=0x3D instead of dos_emu's private AH=0xA0,
+// the whole file API is usable through it.
+//
+// Set to 0 to fall back to the DPMI 0301h thunk path.
+static int dos_use_libc_io = 0;
+
+extern int  open(const char *path, int flags);
+extern int  read(int fd, void *buf, unsigned int n);
+extern int  close(int fd);
+extern long lseek(int fd, long off, int whence);
+
 static unsigned int dos_int21_thunk_seg = 0;
+static unsigned int dos_int21_thunk_linear = 0;
 static int dos_int21_thunk_ready = 0;
 
 // Real-mode stack for the INT 21h call, allocated once at startup.
@@ -188,6 +217,7 @@ static int dos_int21_thunk_init(void) {
         // through is a paragraph we must never set CS:IP to.
         if (thunk[0] == 0xCD && thunk[1] == 0x21 && thunk[2] == 0xCB) {
             dos_int21_thunk_seg = seg;
+            dos_int21_thunk_linear = linear;
             dos_int21_thunk_ready = 1;
             return 0;
         }
@@ -370,9 +400,54 @@ void dos_int21_thunk_preinit(void) {
         if (dos_rm_stack_seg == 0) {
             write(1, "[i21stack:ALLOC-FAILED]\n", 24);
         }
+
+        // Dump every conventional-memory block we hold, so an overlap
+        // is visible rather than inferred. A real-mode stack that
+        // spans a thunk paragraph would corrupt the thunk the moment
+        // DOS or an IRQ pushes onto it.
+        dos_dbg_hex("[seg:bounce]", pktdrv_preallocated_bounce_seg);
+        dos_dbg_hex("[seg:pktthunk]", pktdrv_preallocated_thunk_seg);
+        dos_dbg_hex("[seg:i21thunk]", dos_int21_preallocated_thunk_seg);
+        dos_dbg_hex("[seg:i21stack]", dos_rm_stack_seg);
+        dos_dbg_hex("[seg:i21stacktop]",
+                    dos_rm_stack_seg + (dos_rm_stack_bytes >> 4));
+
+        if (dos_rm_stack_seg != 0 && dos_int21_preallocated_thunk_seg != 0) {
+            unsigned int lo = dos_rm_stack_seg;
+            unsigned int hi = dos_rm_stack_seg + (dos_rm_stack_bytes >> 4);
+            unsigned int th = dos_int21_preallocated_thunk_seg;
+            unsigned int pk = pktdrv_preallocated_thunk_seg;
+            if ((th >= lo && th < hi) || (pk >= lo && pk < hi)) {
+                write(1, "[seg:OVERLAP]\n", 14);
+            }
+        }
     }
     if (dos_int21_thunk_init() == 0) {
         write(1, "[i21thunk:armed]\n", 17);
+        // Bidirectional mapping proof. Everything so far only shows we
+        // can write the bounce and read our own write back — that is
+        // true of ANY writable memory. What matters is whether real
+        // mode sees the same bytes. INT 21h AH=0x47 (Get Current
+        // Directory) makes DOS WRITE into DS:SI. Poison the buffer
+        // first: if the poison survives, DOS wrote somewhere else and
+        // the two views are different memory.
+        if (pktdrv_preallocated_bounce_linear != 0 && dos_int21_thunk_ready) {
+            volatile unsigned char *b =
+                (volatile unsigned char *)pktdrv_preallocated_bounce_linear;
+            for (unsigned int i = 0; i < 8; i++) b[i] = 0xEE;
+            dos_rmcs_t rm;
+            memset(&rm, 0, sizeof(rm));
+            rm.eax = 0x4700;      // AH=0x47, DL=0 -> current drive
+            rm.edx = 0;
+            rm.ds  = (unsigned short)pktdrv_preallocated_bounce_seg;
+            rm.esi = 0;
+            (void)dos_int21_call(&rm);
+            unsigned int w = ((unsigned int)b[0] << 24) | ((unsigned int)b[1] << 16)
+                           | ((unsigned int)b[2] << 8)  | (unsigned int)b[3];
+            dos_dbg_hex("[map:after47]", w);
+            // 0xEEEEEEEE means DOS did not touch our buffer.
+        }
+
     } else {
         write(1, "[i21thunk:FAILED]\n", 18);
     }
@@ -412,6 +487,28 @@ static int dos_int21_call(dos_rmcs_t *rm) {
     // floppy-backed open() reaches BIOS INT 13h, which waits on
     // IRQ 6 — with IF clear that wait never completes.
     // 0x0202 = IF | the x86 always-set bit 1.
+    // The thunk paragraph must still contain `CD 21 CB` at the moment
+    // we point CS:IP at it. It is three bytes of conventional memory
+    // sitting among other DPMI 0x0100 allocations, and if anything
+    // walks over it, DPMI 0x0301 dispatches into whatever replaced it
+    // and executes real-mode garbage with DOS live — no fault, no
+    // return. That is consistent with the observed pattern: the FIRST
+    // INT 21h succeeds and the next one wedges.
+    //
+    // Checking three bytes per DOS call is free next to the call
+    // itself, so verify and repair rather than trust.
+    if (dos_int21_thunk_linear != 0) {
+        volatile unsigned char *t =
+            (volatile unsigned char *)dos_int21_thunk_linear;
+        if (t[0] != 0xCD || t[1] != 0x21 || t[2] != 0xCB) {
+            write(1, "[i21:THUNK-CLOBBERED]\n", 22);
+            dos_dbg_hex("[i21:t0]", t[0]);
+            dos_dbg_hex("[i21:t1]", t[1]);
+            dos_dbg_hex("[i21:t2]", t[2]);
+            t[0] = 0xCD; t[1] = 0x21; t[2] = 0xCB;
+        }
+    }
+
     rm->flags = 0x0202;
     // Bracket the gate. Without these, a wedge inside PMODE/W's 0301h
     // handler is indistinguishable from a wedge anywhere else in the
@@ -434,6 +531,12 @@ static int dos_int21_call(dos_rmcs_t *rm) {
 // when provided).
 int dos_int21_open(const char *path, int dos_access_mode, int *err_out) {
     if (err_out) *err_out = 0;
+    if (dos_use_libc_io) {
+        // DOS access modes 0/1/2 coincide with O_RDONLY/O_WRONLY/O_RDWR.
+        int fd = open(path, dos_access_mode & 3);
+        if (fd < 0) { if (err_out) *err_out = 2; return -1; }
+        return fd;
+    }
     if (pktdrv_preallocated_bounce_seg == 0
         || pktdrv_preallocated_bounce_linear == 0) {
         return -1;
@@ -452,6 +555,22 @@ int dos_int21_open(const char *path, int dos_access_mode, int *err_out) {
     rm.eax = 0x3D00 | (dos_access_mode & 0xFF);
     rm.ds  = (unsigned short)pktdrv_preallocated_bounce_seg;
     rm.edx = 0;                    // offset within DS
+
+    // Dump what DOS will actually read. DS:DX points here, so if these
+    // bytes are not the ASCIIZ filename we just copied, the PM view and
+    // the real-mode view of this paragraph are not the same memory —
+    // which would explain DOS reporting "file not found" for a file
+    // that plainly exists.
+    {
+        volatile unsigned char *chk =
+            (volatile unsigned char *)pktdrv_preallocated_bounce_linear;
+        unsigned int w0 = ((unsigned int)chk[0] << 24) | ((unsigned int)chk[1] << 16)
+                        | ((unsigned int)chk[2] << 8)  | (unsigned int)chk[3];
+        unsigned int w1 = ((unsigned int)chk[4] << 24) | ((unsigned int)chk[5] << 16)
+                        | ((unsigned int)chk[6] << 8)  | (unsigned int)chk[7];
+        dos_dbg_hex("[open:name0]", w0);
+        dos_dbg_hex("[open:name4]", w1);
+    }
 
     if (dos_int21_call(&rm) != 0) return -1;
     if (rm.flags & 1) {            // CF set → error; AX has DOS error code
@@ -472,6 +591,11 @@ int dos_int21_open(const char *path, int dos_access_mode, int *err_out) {
 
 int dos_int21_read(int fd, void *buf, unsigned int count, int *err_out) {
     if (err_out) *err_out = 0;
+    if (dos_use_libc_io) {
+        int n = read(fd, buf, count);
+        if (n < 0) { if (err_out) *err_out = 5; return -1; }
+        return n;
+    }
     if (pktdrv_preallocated_bounce_seg == 0
         || pktdrv_preallocated_bounce_linear == 0) {
         return -1;
@@ -503,6 +627,12 @@ int dos_int21_read(int fd, void *buf, unsigned int count, int *err_out) {
 
 int dos_int21_write(int fd, const void *buf, unsigned int count, int *err_out) {
     if (err_out) *err_out = 0;
+    if (dos_use_libc_io) {
+        extern int write(int fd, const void *buf, unsigned int n);
+        int n = write(fd, buf, count);
+        if (n < 0) { if (err_out) *err_out = 5; return -1; }
+        return n;
+    }
     if (pktdrv_preallocated_bounce_seg == 0
         || pktdrv_preallocated_bounce_linear == 0) {
         return -1;
@@ -531,6 +661,9 @@ int dos_int21_write(int fd, const void *buf, unsigned int count, int *err_out) {
 
 int dos_int21_close(int fd, int *err_out) {
     if (err_out) *err_out = 0;
+    if (dos_use_libc_io) {
+        return close(fd) < 0 ? -1 : 0;
+    }
     dos_rmcs_t rm;
     memset(&rm, 0, sizeof(rm));
     rm.eax = 0x3E00;
@@ -547,6 +680,9 @@ int dos_int21_close(int fd, int *err_out) {
 // 1=CUR, 2=END. Returns the new absolute file position, or -1.
 long dos_int21_lseek(int fd, long offset, int whence, int *err_out) {
     if (err_out) *err_out = 0;
+    if (dos_use_libc_io) {
+        return lseek(fd, offset, whence);
+    }
     dos_rmcs_t rm;
     memset(&rm, 0, sizeof(rm));
     rm.eax = 0x4200 | (whence & 0xFF);
