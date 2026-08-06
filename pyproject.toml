@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "freedos_micro_python"
-version = "0.1.4"
+version = "0.1.5"
 description = "MicroPython port for FreeDOS / i386 — built end-to-end through the uc386 C23 compiler"
 readme = "README.md"
 license = "MIT"
