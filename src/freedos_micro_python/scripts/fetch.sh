@@ -340,6 +340,67 @@ patch_main_pktdrv_prealloc() {
 # `open()` silently fail. Renaming to `_unused_*` defangs the
 # minimal port copies while keeping the file otherwise intact.
 # Idempotent: skips if the rename has already been applied.
+# Patch upstream/ports/minimal/main.c so `MP.EXE SCRIPT.PY [args…]`
+# runs SCRIPT.PY instead of dropping into the REPL. Upstream's
+# minimal port ignores argc/argv entirely, but uc386's PMODE/W
+# harness (addons/harness/exe.py) already parses the PSP command
+# tail at 0x80 and hands main() a real argc/argv — only the C side
+# was missing. With no argument we fall through to the REPL.
+#
+# NOTE ON STYLE: the injected C lives in a quoted heredoc and is
+# pulled into awk with getline, so not one byte of it passes through
+# shell quoting. The older patch functions inline their C as awk
+# `print "…"` lines, which is how an unescaped apostrophe in the word
+# "thunk's" silently truncated patch_main_pktdrv_prealloc for months.
+# Do not reintroduce that pattern here.
+# Idempotent: keyed on the [mp-before-file] marker.
+patch_main_argv_script() {
+    F="upstream/ports/minimal/main.c"
+    if [ ! -f "$F" ]; then return 0; fi
+    if grep -q "mp-before-file" "$F"; then
+        return 0
+    fi
+    if ! grep -q "mp-before-repl" "$F"; then
+        echo "micropython: warn: main.c REPL marker missing — skipping argv patch." >&2
+        return 0
+    fi
+    echo "micropython: patching ports/minimal/main.c for command-line script execution …"
+    cat > "$F.argvins" <<'ARGVEOF'
+    // uc386-dos: run a script named on the DOS command line.
+    //
+    // uc386's PMODE/W harness parses the PSP command tail and gives
+    // main() a real argc/argv, so
+    //     MP.EXE SCRIPT.PY [args ...]
+    // executes SCRIPT.PY and exits with 0 on success, 1 on an
+    // uncaught exception. Remaining words land in sys.argv. With no
+    // argument we fall through to the interactive REPL as before.
+    if (argc > 1) {
+        for (int mp_ai = 1; mp_ai < argc; mp_ai++) {
+            const char *mp_a = argv[mp_ai];
+            size_t mp_alen = 0;
+            while (mp_a[mp_alen]) mp_alen++;
+            mp_obj_list_append(
+                MP_OBJ_FROM_PTR(&MP_STATE_VM(mp_sys_argv_obj)),
+                mp_obj_new_str(mp_a, mp_alen));
+        }
+        write(1, "[mp-before-file]\n", 17);
+        int mp_rc = pyexec_file(argv[1]);
+        write(1, "[mp-after-file]\n", 16);
+        mp_deinit();
+        return mp_rc ? 0 : 1;
+    }
+ARGVEOF
+    awk -v insfile="$F.argvins" '
+        /mp-before-repl/ && !inserted {
+            while ((getline line < insfile) > 0) print line
+            close(insfile)
+            inserted = 1
+        }
+        { print }
+    ' "$F" > "$F.tmp" && mv "$F.tmp" "$F"
+    rm -f "$F.argvins"
+}
+
 patch_main_disable_fs_stubs() {
     F="upstream/ports/minimal/main.c"
     if [ ! -f "$F" ]; then return 0; fi
@@ -1001,6 +1062,7 @@ if [ -d upstream ]; then
     patch_modlwip_loopback_poll
     patch_main_startup_markers
     patch_main_pktdrv_prealloc
+    patch_main_argv_script
     patch_main_disable_fs_stubs
     patch_axtls_config_verify
     patch_axtls_endian_include
@@ -1045,6 +1107,7 @@ fetch_tweetnacl
 patch_modlwip_loopback_poll
 patch_main_startup_markers
 patch_main_pktdrv_prealloc
+patch_main_argv_script
 patch_main_disable_fs_stubs
 patch_axtls_config_verify
 patch_axtls_endian_include

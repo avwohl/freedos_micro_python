@@ -120,25 +120,63 @@ static int dos_int21_thunk_init(void) {
     // and our `CD 21 CB` write then doesn't end up at the real-mode
     // address DPMI 0x0301 dispatches to. The pktdrv bounce buffer
     // does the same dance for the same reason (see main.c).
+    // Two candidate linear addresses for the paragraph:
+    //   (a) the DPMI 0x0002 + 0x0006 dance, and
+    //   (b) the plain `seg << 4` identity mapping.
+    // Under PMODE/W with a zero-based flat client these agree, but
+    // we must not *assume* it: if we write `CD 21 CB` to the wrong
+    // linear address, the write silently corrupts whatever lives
+    // there AND DPMI 0x0301 then dispatches CS:IP = seg:0000 into an
+    // uninitialised real-mode paragraph. Executing garbage in real
+    // mode with DOS's structures live is unrecoverable — no fault,
+    // no traceback, the machine simply dies (observed as MP.EXE
+    // vanishing and FreeCOM reporting "Cannot terminate permanent
+    // FreeCOM instance / System halted").
+    //
+    // So: resolve, write, and then READ BACK through the same
+    // pointer. Only a successful read-back sets `..._ready`. If both
+    // candidates fail we leave the thunk unarmed, and every caller
+    // returns -1 -> a clean Python OSError instead of a dead machine.
+    unsigned int linear_dpmi = 0;
     unsigned int r2[8] = {0};
     r2[R_EAX] = 0x0002;
     r2[R_EBX] = seg;
-    if (pktdrv_int_invoke(0x31, r2)) return -1;
-    unsigned int sel = r2[R_EAX] & 0xFFFF;
-    unsigned int r3[8] = {0};
-    r3[R_EAX] = 0x0006;
-    r3[R_EBX] = sel;
-    if (pktdrv_int_invoke(0x31, r3)) return -1;
-    unsigned int linear = ((r3[R_ECX] & 0xFFFF) << 16) | (r3[R_EDX] & 0xFFFF);
+    if (!pktdrv_int_invoke(0x31, r2)) {
+        unsigned int sel = r2[R_EAX] & 0xFFFF;
+        unsigned int r3[8] = {0};
+        r3[R_EAX] = 0x0006;
+        r3[R_EBX] = sel;
+        if (!pktdrv_int_invoke(0x31, r3)) {
+            linear_dpmi = ((r3[R_ECX] & 0xFFFF) << 16) |
+                          (r3[R_EDX] & 0xFFFF);
+        }
+    }
+    unsigned int linear_shift = seg << 4;
 
-    unsigned char *thunk = (unsigned char *)linear;
-    thunk[0] = 0xCD;             // INT
-    thunk[1] = 0x21;             // vector 21h
-    thunk[2] = 0xCB;             // RETF
+    unsigned int candidates[2];
+    candidates[0] = linear_dpmi;
+    candidates[1] = linear_shift;
 
-    dos_int21_thunk_seg = seg;
-    dos_int21_thunk_ready = 1;
-    return 0;
+    for (int i = 0; i < 2; i++) {
+        unsigned int linear = candidates[i];
+        if (linear == 0) continue;
+        if (i == 1 && linear == candidates[0]) continue;  // already tried
+
+        volatile unsigned char *thunk = (volatile unsigned char *)linear;
+        thunk[0] = 0xCD;             // INT
+        thunk[1] = 0x21;             // vector 21h
+        thunk[2] = 0xCB;             // RETF
+
+        // Read back before trusting it. A paragraph we cannot write
+        // through is a paragraph we must never set CS:IP to.
+        if (thunk[0] == 0xCD && thunk[1] == 0x21 && thunk[2] == 0xCB) {
+            dos_int21_thunk_seg = seg;
+            dos_int21_thunk_ready = 1;
+            return 0;
+        }
+    }
+
+    return -1;
 }
 
 // Pre-init entry called from main() at shallow stack. The DPMI
@@ -151,7 +189,17 @@ static int dos_int21_thunk_init(void) {
 // keeps every subsequent `dos_int21_call` to just the DPMI 0x0301
 // real-mode-call gate, which is stack-depth-safe.
 void dos_int21_thunk_preinit(void) {
-    (void)dos_int21_thunk_init();
+    // Report the outcome. This used to be discarded, which meant a
+    // failed thunk arm was indistinguishable from a good one until
+    // the first open() took the machine down. The markers are cheap
+    // and they are the only visibility into this path on real
+    // hardware, where there is no debugger.
+    extern int write(int fd, const void *buf, unsigned int n);
+    if (dos_int21_thunk_init() == 0) {
+        write(1, "[i21thunk:armed]\n", 17);
+    } else {
+        write(1, "[i21thunk:FAILED]\n", 18);
+    }
 }
 
 // Stack-switching DPMI 0x0301 dispatcher in uc386's libc — switches
@@ -172,6 +220,13 @@ static int dos_int21_call(dos_rmcs_t *rm) {
     rm->ip = 0;
     rm->ss = 0;
     rm->sp = 0;
+    // Enter the real-mode INT 21h with interrupts ENABLED. The rmcs
+    // is memset to 0 by every caller, which left IF clear. FreeDOS's
+    // INT 21h does STI early so it usually recovers, but a
+    // floppy-backed open() reaches BIOS INT 13h, which waits on
+    // IRQ 6 — with IF clear that wait never completes.
+    // 0x0202 = IF | the x86 always-set bit 1.
+    rm->flags = 0x0202;
     return dpmi0301_call_shallow(rm) ? -1 : 0;
 }
 
