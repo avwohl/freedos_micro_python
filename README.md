@@ -98,15 +98,21 @@ You can also paste a program straight into the REPL: press `Ctrl-E`,
 paste, then `Ctrl-D`. This needs no file at all, which makes it the
 reliable option in the environment noted below.
 
-> **Reading files from disk depends on your environment.** Verified
-> working under DOSBox-X: `MP.EXE SCRIPT.PY`, `open()`, `read()`,
-> `import` of a `.py`. Under **QEMU + FreeDOS** any DOS call that
-> touches a physical sector currently hangs, which takes
-> `MP.EXE SCRIPT.PY` and `open()` with it — see
-> [`docs/WIP.md`](docs/WIP.md) item 2 for the evidence and what is
-> ruled out. Paste mode is unaffected because it never touches the
-> disk. The examples below therefore run today under DOSBox-X; on
-> QEMU + FreeDOS they will hang on their first file access.
+> **Build with DOS/32A if you want disk I/O on real DOS.** The
+> prebuilt `MP.EXE` on the Releases page already is. If you build it
+> yourself, pass:
+>
+> ```
+> python -m addons.harness.exe build/micropython.asm -o MP.EXE \
+>     --extender=dos32a --stub-binary <path/to/DOS32A.EXE>
+> ```
+>
+> The default extender is PMODE/W, because its stub ships with the
+> harness — but PMODE/W's real-mode call path hangs on any DOS call
+> that touches a physical sector under QEMU + FreeDOS, which takes
+> `open()` and `MP.EXE SCRIPT.PY` with it. DOS/32A does not have that
+> problem; see [`docs/WIP.md`](docs/WIP.md) item 2. A DOS/32A build is
+> verified working on QEMU + FreeDOS, DOSBox-X and dosiz.
 
 - **[`examples/wget.py`](examples/wget.py)** — HTTPS streaming
   downloader. Built on `socket` (lwIP-backed) and `ssl` (axtls

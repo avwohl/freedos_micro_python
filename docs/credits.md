@@ -97,3 +97,15 @@ work of every contributor to every project above. If you find a
 bug here, file it at
 <https://github.com/avwohl/freedos_micro_python/issues>; if you
 improve it, we'd love the PR.
+
+## DOS/32A
+
+The released `MP.EXE` bundles the DOS/32A DOS extender as its MZ stub.
+
+    DOS/32A -- Copyright (C) 1996-2006 by Narech K.
+
+Redistributed in binary form under its BSD-style licence, which permits
+redistribution with the copyright notice reproduced in the accompanying
+documentation. DOS/32A is not part of this project and is not modified;
+it is bound into the executable at link time so the program is
+self-contained on a DOS machine.

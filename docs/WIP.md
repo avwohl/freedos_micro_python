@@ -225,152 +225,59 @@ the test passed.
    that rig needs networking under QEMU but not disk, so item 2
    does not block it.
 
-2. **Disk I/O wedges under QEMU + FreeDOS + PMODE/W.** Any DOS
-   call that touches a physical sector hangs: no fault, no
-   return, no traceback. Everything else works.
+2. **FIXED: disk I/O under QEMU + FreeDOS.** It was PMODE/W,
+   plus a stack-alignment bug in our own LE writer. Build with
+   DOS/32A and everything works:
 
-   **This is not a bug in `dosint21_uc386dos.c`.** The previous
-   entry here blamed "open() after `import _ssh` hangs in DPMI
-   0x0301"; measurement disproves that framing. What is now
-   established, with the evidence:
+       python -m addons.harness.exe build/micropython.asm -o MP.EXE \
+           --extender=dos32a --stub-binary <path/to/DOS32A.EXE>
 
-   - **The DPMI 0x0301 gate is sound.** Reading the `NUL`
-     device through the very same thunk is flawless and
-     repeatable — `open("NUL","rb")`, `read(4)` returning
-     `b"\x00\x00\x00\x00"`, `close()`, each bracketed by
-     `[i21:call]` / `[i21:ret]`.
-   - **The bounce buffer really is shared with real mode, in
-     both directions.** Poisoning it with `0xEE` and issuing
-     INT 21h AH=0x47 (Get Current Directory) yields
-     `[map:after47]=00eeeeee` — DOS wrote its terminating NUL
-     at offset 0 and left the rest, exactly right for a root
-     directory. Earlier checks only ever read back our own
-     write, which any writable memory passes.
-   - **The filename reaching DOS is correct**:
-     `[open:name0]=44415441` ("DATA"), `[open:name4]=2e545854`
-     (".TXT").
-   - **Addresses and allocations are correct.** The client flat
-     base is 0 (`[client:dsbase]=00000000`), the image is
-     relocated above 1 MB (`[addr:text]=0016354d`), the DPMI
-     0x0002/0x0006 answer and `seg << 4` agree exactly
-     (`0x3003` -> `0x30030`), and no allocation overlaps
-     (`[seg:i21thunk]=3084`, stack `3086..3186` growing *down*
-     from `0x0FFE`, so it never reaches the thunk).
-   - **Both independent paths fail identically.** Routing the
-     whole file API through PMODE/W's *own* INT 21h translation
-     instead of our thunk (`dos_use_libc_io = 1` in
-     `dosint21_uc386dos.c`) wedges on disk reads in exactly the
-     same way. The common factor is not our code.
-   - **It works elsewhere.** Under DOSBox-X, whose `mount`
-     serves files through its own DOS layer with no BIOS INT 13h
-     path, the full sequence succeeds through our thunk:
-     `open` / `read` returning real file content / `close`, and
-     `MP.EXE HELLO.PY one two` runs the script and reports
-     `sys.argv == ["HELLO.PY", "one", "two"]`.
+   Verified on QEMU + FreeDOS, DOSBox-X and dosiz with one
+   binary: script execution with argv, open/read/create/write/
+   append, `os.listdir` / `os.stat` / `os.path.*` /
+   `shutil.copyfile`, and containment.
 
-   So the remaining suspect is real-mode BIOS disk I/O (INT 13h)
-   executed while running as a PMODE/W protected-mode client:
-   the floppy BIOS waits on IRQ 6 and that wait never completes.
-   A FAT16 IDE hard disk behaves the same, so it is not
-   floppy- or IRQ-6-specific.
+   **What it actually was.** Two independent faults that
+   masked each other:
 
-   **Where to look next — and it is not this port.** Whether
-   hardware interrupts are delivered at all while the client is
-   inside a DPMI real-mode call is an extender/host concern.
-   Before any further work goes into `dosint21_uc386dos.c`,
-   confirm the behaviour on the real deployment target: FreeDOS
-   under VMware. That is the one environment nobody has tested.
+   - **PMODE/W's real-mode call path.** Seen from the QEMU
+     monitor while hung: the CPU spins in the BIOS at
+     `f000:8913` with `imr=0xFF` — every IRQ masked — and
+     `irr` showing IRQ 6 pending. The BIOS disk service is
+     waiting for a completion flag its own masked handler can
+     never set. At the DOS prompt the mask is a healthy
+     `0xB8`, and nothing in this port writes the PIC.
+     Unmasking the disk lines from protected mode before the
+     call does not help — the machine then halts instead of
+     hanging, because the interrupt arrives in a real-mode
+     environment the extender has not prepared. This is why
+     PMODE/W's own INT 21h translation failed identically.
+     DOS/32A does not have the problem.
 
-   **dosiz status: WORKS.** dosiz now runs MP.EXE completely,
-   disk I/O included — script loaded from disk, file read,
-   file created and written, `os.listdir` correct. Getting
-   there took five dosiz fixes, none of them in this port:
-   `CPU_JMP` discarding `use32` (every LE entry EIP truncated
-   to 16 bits), LE entry putting the flat data selector in ES
-   instead of a PSP alias (so `[es:0x80]` read the IVT and
-   clients saw a phantom argv), `AH=0x1A` Set-DTA truncating
-   the DTA pointer to 16 bits, `le_load_objects` rejecting
-   zero-size objects, and — the big one — a `stack_obj == 0`
-   client having its stack carved out of the auto-data object
-   so it grew down through its own BSS.
+   - **Misaligned stack under DOS/32A** (upyle, fixed in
+     0.1.2). `explicit_stack_object` set `init_esp` to
+     `bss_virt_size`, usually odd — `0x187ffb` here — so every
+     stack local was misaligned. x86 does not care for ordinary
+     loads and stores, which is why a minimal C test passes,
+     but MicroPython tags small ints as `(n << 1) | 1` and
+     needs object pointers 4-byte aligned. The address of a
+     stack-allocated object read back as a small int, and
+     `2 in [1, 2, 3]` raised
+     `TypeError: 'int' object isn't an iterator` — the iterator
+     buffer `py/runtime.c` puts on the stack. `init_esp` is now
+     aligned down to 16.
 
-   **A real bug in THIS port, found by that last one.** The
-   linked stack was 64 KB (LE+0xAC) while
-   `mp_stack_set_limit()` claimed 768 KB. MicroPython's
-   stack-overflow guard therefore could never trip, and a deep
-   parse ran off the end of the stack into whatever lay beyond.
-   Silent, and layout-dependent — which is exactly the
-   unexplained instability recorded below. Now 256 KB linked
-   (upyle `write_le(stack_size=...)`) with a 192 KB guard.
+   Note the two hid each other: PMODE/W builds had working
+   containment but no disk, DOS/32A builds had disk but broken
+   containment. Only fixing both gives a working configuration.
 
-   Under QEMU that fix made `open()` reliable where it had been
-   crashing or returning spurious ENOENT. What still wedges
-   there is narrower and now precisely characterised:
-
-     works:  open an existing file (0x3D), read the NUL device
-     wedges: create (0x3C), read data (0x3F)
-
-   i.e. every operation that must actually touch the media,
-   and only those.
-
-   **THE CAUSE IS PMODE/W, AND DOS/32A FIXES IT.** Built with
-   `--extender=dos32a --stub-binary <DOS32A.EXE>` and nothing
-   else changed, the same MicroPython runs on QEMU + FreeDOS
-   with working disk I/O:
-
-       MP.EXE FULL.PY alpha
-       Q:argv       ['FULL.PY', 'alpha']
-       Q:roundtrip  b'written-on-qemu\n'
-       Q:append     b'written-on-qemu\n+more'
-       F:read       b'HELLO-FROM-DISK\n'
-
-   open, read, create, write, append and command-line script
-   execution all work. So the long-standing "disk wedge" is
-   specific to PMODE/W's real-mode call path, not to this port,
-   not to FreeDOS, and not to QEMU.
-
-   What the wedge looks like from the outside, via the QEMU
-   monitor while hung: the CPU spins in the BIOS at
-   `f000:8913` with `imr=0xFF` — every IRQ masked — and `irr`
-   showing IRQ 6 pending. The BIOS disk service is waiting for
-   a completion flag its own (masked) handler can never set. At
-   the DOS prompt the mask is a healthy `0xB8`, and nothing in
-   this port writes the PIC. Unmasking the disk lines from
-   protected mode before the call does not help: the machine
-   then halts instead of hanging, because the interrupt is
-   delivered into a real-mode environment the extender has not
-   prepared. Both failure modes are PMODE/W's.
-
-   **Caveat on the DOS/32A build, and it is not small.** The
-   `in` operator fails there — `2 in [1, 2, 3]` raises
-   `TypeError: 'int' object isn't an iterator` — while it works
-   under PMODE/W on the same QEMU. That is the same signature
-   as the dosiz stack bug: `py/runtime.c`'s containment
-   fallback allocates its iterator buffer on the stack, and it
-   reads back garbage. Root cause is the selector model: upyle
-   sets `explicit_stack_object` for DOS/32A (which refuses
-   `init_obj_ss=0`), so SS is based on the BSS object while the
-   code addresses memory flat, and every address-of-a-stack-local
-   is wrong by the object base. Pointing SS at DS in the bridge
-   does not fix it, because under DOS/32A the other selectors
-   are object-relative too — the whole path needs flat
-   selectors to match uc386's code model. That is the next
-   piece of work, and it is in upyle's DOS/32A packaging, not
-   in this port. A partitioned FAT16 IDE hard disk wedges
-   identically, so it is not floppy- or IRQ-6-specific.
-   Combined with the fact that PMODE/W's own INT 21h
-   translation fails the same way, and that the same binary is
-   correct under both DOSBox-X and dosiz, the remaining suspect
-   is real-mode BIOS disk I/O executed while running as a
-   PMODE/W protected-mode client under QEMU.
-
-   **The loose end is closed.** The instability across rebuilds
-   that differed only in code layout — `open()` alternating
-   between succeeding and a spurious `ENOENT` — was the stack
-   overrun above. Code layout decided what the runaway stack
-   landed on. The conclusion above rests on the
-   NUL-vs-disk and thunk-vs-translation contrasts, both of which
-   were consistent, rather than on run-to-run determinism.
+   **Still open, minor:** PMODE/W remains the harness default
+   because its stub is bundled, so a plain build still cannot
+   do disk I/O on QEMU. DOS/32A needs its stub passed with
+   `--stub-binary`. If PMODE/W is not needed, making DOS/32A
+   the default (bundling its stub — it is BSD-licensed, so
+   redistribution is fine with attribution) would make the
+   default build work everywhere.
 
 3. **Public-key auth from file** —
    `session.userauth_publickey_fromfile(user, pub_path,
