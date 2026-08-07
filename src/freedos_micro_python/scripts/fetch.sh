@@ -497,7 +497,15 @@ patch_main_stack_and_argv_init() {
     echo "micropython: adding mp_stack_ctrl_init + sys.argv init around mp_init() ..."
     cat > "$F.initins" <<'INITEOF'
     mp_stack_ctrl_init();
-    mp_stack_set_limit(0xC0000);
+    // MUST stay below the stack the linker actually allocates (see
+    // uc386 addons/harness/exe.py, "option stack="), which lands in
+    // the LE header at 0xAC and is what the DOS extender hands us.
+    // This said 0xC0000 (768 KB) against a 64 KB stack: the guard
+    // could never trip, so a deep parse ran off the end of the stack
+    // and corrupted whatever was beyond it. Silent and
+    // layout-dependent.
+    // 256 KB linked, 192 KB limit -> 64 KB of headroom.
+    mp_stack_set_limit(0x30000);
     mp_init();
     mp_obj_list_init((mp_obj_list_t *)&MP_STATE_VM(mp_sys_argv_obj), 0);
 INITEOF

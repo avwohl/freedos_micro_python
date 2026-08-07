@@ -281,36 +281,49 @@ the test passed.
    confirm the behaviour on the real deployment target: FreeDOS
    under VMware. That is the one environment nobody has tested.
 
-   **dosiz status (updated).** dosiz now loads and runs MP.EXE:
-   it reaches `main`, completes the DPMI pre-allocations,
-   dispatches INT 21h through the 0x0301 gate and exits cleanly
-   through the bridge. It previously `#GP`d at
-   `CS:EIP=002c:00000ff3` before executing a single instruction.
+   **dosiz status: WORKS.** dosiz now runs MP.EXE completely,
+   disk I/O included — script loaded from disk, file read,
+   file created and written, `os.listdir` correct. Getting
+   there took five dosiz fixes, none of them in this port:
+   `CPU_JMP` discarding `use32` (every LE entry EIP truncated
+   to 16 bits), LE entry putting the flat data selector in ES
+   instead of a PSP alias (so `[es:0x80]` read the IVT and
+   clients saw a phantom argv), `AH=0x1A` Set-DTA truncating
+   the DTA pointer to 16 bits, `le_load_objects` rejecting
+   zero-size objects, and — the big one — a `stack_obj == 0`
+   client having its stack carved out of the auto-data object
+   so it grew down through its own BSS.
 
-   That was NOT the DPMI fn 0x0205 gate-width patch — that patch
-   is present and correct, and `GDTDescriptorTable::GetDescriptor`
-   does handle the TI bit for the LDT selectors the LE loader
-   hands out. The real fault was dosiz's own `CPU_JMP`
-   (`src/compat/dosbox_compat.cc`) discarding its `use32`
-   argument, so `far_call_or_jmp` finished the transfer with
-   `ip = op_size_32 ? offset : (offset & 0xFFFF)` using the
-   operand size of the *previously executing* code — real mode,
-   16-bit, on first entry to a PM client. Every LE entry EIP was
-   truncated to 16 bits; dosiz could not run its own
-   `tests/LE_MIN.EXE` either. Fixed in dosiz `ae8f107`.
+   **A real bug in THIS port, found by that last one.** The
+   linked stack was 64 KB (LE+0xAC) while
+   `mp_stack_set_limit()` claimed 768 KB. MicroPython's
+   stack-overflow guard therefore could never trip, and a deep
+   parse ran off the end of the stack into whatever lay beyond.
+   Silent, and layout-dependent — which is exactly the
+   unexplained instability recorded below. Now 256 KB linked
+   (upyle `write_le(stack_size=...)`) with a 192 KB guard.
 
-   Remaining on dosiz: `open()` returns ENOENT for a file that
-   exists in the working directory, even though dosiz's own
-   DJGPP file fixture reports `dj-file=ok`. That points at how
-   dosiz's simulated real-mode INT 21h resolves `DS:DX` for a
-   call arriving through DPMI 0x0301, rather than at this port.
-   Worth finishing, because it would give a second independent
-   environment alongside DOSBox-X.
+   Under QEMU that fix made `open()` reliable where it had been
+   crashing or returning spurious ENOENT. What still wedges
+   there is narrower and now precisely characterised:
 
-   **One loose end, stated plainly:** across rebuilds that
-   differed only in code layout, `open()` alternated between
-   succeeding and returning a spurious `ENOENT` under QEMU. That
-   instability is unexplained. The conclusion above rests on the
+     works:  open an existing file (0x3D), read the NUL device
+     wedges: create (0x3C), read data (0x3F)
+
+   i.e. every operation that must actually touch the media,
+   and only those. A partitioned FAT16 IDE hard disk wedges
+   identically, so it is not floppy- or IRQ-6-specific.
+   Combined with the fact that PMODE/W's own INT 21h
+   translation fails the same way, and that the same binary is
+   correct under both DOSBox-X and dosiz, the remaining suspect
+   is real-mode BIOS disk I/O executed while running as a
+   PMODE/W protected-mode client under QEMU.
+
+   **The loose end is closed.** The instability across rebuilds
+   that differed only in code layout — `open()` alternating
+   between succeeding and a spurious `ENOENT` — was the stack
+   overrun above. Code layout decided what the runaway stack
+   landed on. The conclusion above rests on the
    NUL-vs-disk and thunk-vs-translation contrasts, both of which
    were consistent, rather than on run-to-run determinism.
 
