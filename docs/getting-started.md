@@ -52,13 +52,11 @@ To run a program without any file on disk, paste it into the REPL:
 press `Ctrl-E`, paste the text, then `Ctrl-D` to execute. Multi-line
 definitions work; this is the standard MicroPython paste mode.
 
-> **If you build it yourself, use DOS/32A.** The released `MP.EXE`
-> already does. The harness defaults to PMODE/W because that stub is
-> bundled, but PMODE/W hangs on any DOS call that touches a physical
-> sector under QEMU + FreeDOS. Add
-> `--extender=dos32a --stub-binary <path/to/DOS32A.EXE>` and file
-> access works there, on DOSBox-X, and under dosiz. Details in
-> [`WIP.md`](WIP.md) item 2.
+> **File access works** on QEMU + FreeDOS, DOSBox-X and dosiz. The
+> build bundles the DOS/32A extender, which the harness now selects by
+> default — you do not need to pass anything. PMODE/W is still
+> available with `--extender=pmodew`, but it cannot do disk I/O on real
+> DOS; see [`WIP.md`](WIP.md) item 2.
 
 ## Integers are 64-bit
 

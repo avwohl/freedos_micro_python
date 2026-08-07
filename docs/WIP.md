@@ -271,13 +271,11 @@ the test passed.
    containment but no disk, DOS/32A builds had disk but broken
    containment. Only fixing both gives a working configuration.
 
-   **Still open, minor:** PMODE/W remains the harness default
-   because its stub is bundled, so a plain build still cannot
-   do disk I/O on QEMU. DOS/32A needs its stub passed with
-   `--stub-binary`. If PMODE/W is not needed, making DOS/32A
-   the default (bundling its stub — it is BSD-licensed, so
-   redistribution is fine with attribution) would make the
-   default build work everywhere.
+   **Closed out:** DOS/32A is now the harness default and
+   upyle 0.2.0 ships its (BSD-licensed, attributed) stub, so a
+   plain `python -m addons.harness.exe foo.asm -o FOO.EXE`
+   with no flags produces a binary that works everywhere.
+   PMODE/W stays selectable with `--extender=pmodew`.
 
 3. **Public-key auth from file** —
    `session.userauth_publickey_fromfile(user, pub_path,

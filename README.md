@@ -98,21 +98,15 @@ You can also paste a program straight into the REPL: press `Ctrl-E`,
 paste, then `Ctrl-D`. This needs no file at all, which makes it the
 reliable option in the environment noted below.
 
-> **Build with DOS/32A if you want disk I/O on real DOS.** The
-> prebuilt `MP.EXE` on the Releases page already is. If you build it
-> yourself, pass:
+> **Reading files from disk works.** Verified with one binary on
+> QEMU + FreeDOS, DOSBox-X and dosiz: `MP.EXE SCRIPT.PY` with
+> `sys.argv`, `open()` / `read()` / `write()` / append, `import` of a
+> `.py`, and the `os` / `shutil` calls.
 >
-> ```
-> python -m addons.harness.exe build/micropython.asm -o MP.EXE \
->     --extender=dos32a --stub-binary <path/to/DOS32A.EXE>
-> ```
->
-> The default extender is PMODE/W, because its stub ships with the
-> harness — but PMODE/W's real-mode call path hangs on any DOS call
-> that touches a physical sector under QEMU + FreeDOS, which takes
-> `open()` and `MP.EXE SCRIPT.PY` with it. DOS/32A does not have that
-> problem; see [`docs/WIP.md`](docs/WIP.md) item 2. A DOS/32A build is
-> verified working on QEMU + FreeDOS, DOSBox-X and dosiz.
+> The build bundles the DOS/32A extender. PMODE/W is still selectable
+> with `--extender=pmodew`, but its real-mode call path hangs on any
+> DOS call that touches a physical sector — see
+> [`docs/WIP.md`](docs/WIP.md) item 2.
 
 - **[`examples/wget.py`](examples/wget.py)** — HTTPS streaming
   downloader. Built on `socket` (lwIP-backed) and `ssl` (axtls
