@@ -513,6 +513,60 @@ INITEOF
     rm -f "$F.initins"
 }
 
+# Route the injected startup markers through MP_MARK() so they can be
+# compiled out.
+#
+# patch_main_startup_markers and patch_main_pktdrv_prealloc write their
+# progress with raw write(1, "[mp-...]", n). Those markers earned their
+# keep — they are how the PMODE/W entry path was debugged and docs/WIP.md
+# still names them — but they print on the program's own stdout, so a
+# script's first line of output arrives after a dozen lines of
+# diagnostics.
+#
+# Rewrites them to MP_MARK(...) and defines that as a no-op unless
+# MP_STARTUP_MARKERS is 1. Set it in mpconfigport.h (or -DMP_STARTUP_MARKERS=1)
+# to get them back.
+# Idempotent: keyed on the MP_MARK definition.
+patch_main_gate_markers() {
+    F="upstream/ports/minimal/main.c"
+    if [ ! -f "$F" ]; then return 0; fi
+    if grep -q "define MP_MARK" "$F"; then
+        return 0
+    fi
+    if ! grep -q 'write(1, "\[' "$F"; then
+        return 0
+    fi
+    echo "micropython: gating startup markers behind MP_STARTUP_MARKERS …"
+    # 1. rewrite the marker writes (only those whose text starts with "[")
+    sed -i.bak 's|write(1, "\(\[[^"]*\)", \([0-9]*\));|MP_MARK("\1", \2);|g' "$F"
+    rm -f "$F.bak"
+    # 2. define MP_MARK just after the includes
+    cat > "$F.mark" <<'MARKEOF'
+
+// Startup progress markers. Off by default: they share stdout with the
+// program. Build with -DMP_STARTUP_MARKERS=1 to re-enable.
+#ifndef MP_STARTUP_MARKERS
+#define MP_STARTUP_MARKERS 0
+#endif
+#if MP_STARTUP_MARKERS
+#define MP_MARK(s, n) write(1, (s), (n))
+#else
+#define MP_MARK(s, n) ((void)0)
+#endif
+MARKEOF
+    awk -v insfile="$F.mark" '
+        !done && /^#include <unistd.h>/ {
+            print
+            while ((getline line < insfile) > 0) print line
+            close(insfile)
+            done = 1
+            next
+        }
+        { print }
+    ' "$F" > "$F.tmp" && mv "$F.tmp" "$F"
+    rm -f "$F.mark"
+}
+
 patch_main_argv_script() {
     F="upstream/ports/minimal/main.c"
     if [ ! -f "$F" ]; then return 0; fi
@@ -1233,6 +1287,7 @@ apply_all_patches() {
     patch_main_pktdrv_prealloc
     patch_main_stack_and_argv_init
     patch_main_argv_script
+    patch_main_gate_markers
     patch_main_disable_fs_stubs
     patch_axtls_config_verify
     patch_axtls_endian_include
