@@ -278,11 +278,34 @@ the test passed.
    hardware interrupts are delivered at all while the client is
    inside a DPMI real-mode call is an extender/host concern.
    Before any further work goes into `dosint21_uc386dos.c`,
-   confirm the behaviour on the real deployment target (FreeDOS
-   under VMware) or on dosiz. dosiz could not be used for this:
-   it faults with `#GP` at `CS:EIP=002c:00000ff3` before
-   reaching `main`, needing the DPMI fn 0x0205 gate-width patch
-   recorded below as local-only and absent from the checkout.
+   confirm the behaviour on the real deployment target: FreeDOS
+   under VMware. That is the one environment nobody has tested.
+
+   **dosiz status (updated).** dosiz now loads and runs MP.EXE:
+   it reaches `main`, completes the DPMI pre-allocations,
+   dispatches INT 21h through the 0x0301 gate and exits cleanly
+   through the bridge. It previously `#GP`d at
+   `CS:EIP=002c:00000ff3` before executing a single instruction.
+
+   That was NOT the DPMI fn 0x0205 gate-width patch — that patch
+   is present and correct, and `GDTDescriptorTable::GetDescriptor`
+   does handle the TI bit for the LDT selectors the LE loader
+   hands out. The real fault was dosiz's own `CPU_JMP`
+   (`src/compat/dosbox_compat.cc`) discarding its `use32`
+   argument, so `far_call_or_jmp` finished the transfer with
+   `ip = op_size_32 ? offset : (offset & 0xFFFF)` using the
+   operand size of the *previously executing* code — real mode,
+   16-bit, on first entry to a PM client. Every LE entry EIP was
+   truncated to 16 bits; dosiz could not run its own
+   `tests/LE_MIN.EXE` either. Fixed in dosiz `ae8f107`.
+
+   Remaining on dosiz: `open()` returns ENOENT for a file that
+   exists in the working directory, even though dosiz's own
+   DJGPP file fixture reports `dj-file=ok`. That points at how
+   dosiz's simulated real-mode INT 21h resolves `DS:DX` for a
+   call arriving through DPMI 0x0301, rather than at this port.
+   Worth finishing, because it would give a second independent
+   environment alongside DOSBox-X.
 
    **One loose end, stated plainly:** across rebuilds that
    differed only in code layout, `open()` alternated between
