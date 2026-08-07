@@ -311,7 +311,52 @@ the test passed.
      wedges: create (0x3C), read data (0x3F)
 
    i.e. every operation that must actually touch the media,
-   and only those. A partitioned FAT16 IDE hard disk wedges
+   and only those.
+
+   **THE CAUSE IS PMODE/W, AND DOS/32A FIXES IT.** Built with
+   `--extender=dos32a --stub-binary <DOS32A.EXE>` and nothing
+   else changed, the same MicroPython runs on QEMU + FreeDOS
+   with working disk I/O:
+
+       MP.EXE FULL.PY alpha
+       Q:argv       ['FULL.PY', 'alpha']
+       Q:roundtrip  b'written-on-qemu\n'
+       Q:append     b'written-on-qemu\n+more'
+       F:read       b'HELLO-FROM-DISK\n'
+
+   open, read, create, write, append and command-line script
+   execution all work. So the long-standing "disk wedge" is
+   specific to PMODE/W's real-mode call path, not to this port,
+   not to FreeDOS, and not to QEMU.
+
+   What the wedge looks like from the outside, via the QEMU
+   monitor while hung: the CPU spins in the BIOS at
+   `f000:8913` with `imr=0xFF` — every IRQ masked — and `irr`
+   showing IRQ 6 pending. The BIOS disk service is waiting for
+   a completion flag its own (masked) handler can never set. At
+   the DOS prompt the mask is a healthy `0xB8`, and nothing in
+   this port writes the PIC. Unmasking the disk lines from
+   protected mode before the call does not help: the machine
+   then halts instead of hanging, because the interrupt is
+   delivered into a real-mode environment the extender has not
+   prepared. Both failure modes are PMODE/W's.
+
+   **Caveat on the DOS/32A build, and it is not small.** The
+   `in` operator fails there — `2 in [1, 2, 3]` raises
+   `TypeError: 'int' object isn't an iterator` — while it works
+   under PMODE/W on the same QEMU. That is the same signature
+   as the dosiz stack bug: `py/runtime.c`'s containment
+   fallback allocates its iterator buffer on the stack, and it
+   reads back garbage. Root cause is the selector model: upyle
+   sets `explicit_stack_object` for DOS/32A (which refuses
+   `init_obj_ss=0`), so SS is based on the BSS object while the
+   code addresses memory flat, and every address-of-a-stack-local
+   is wrong by the object base. Pointing SS at DS in the bridge
+   does not fix it, because under DOS/32A the other selectors
+   are object-relative too — the whole path needs flat
+   selectors to match uc386's code model. That is the next
+   piece of work, and it is in upyle's DOS/32A packaging, not
+   in this port. A partitioned FAT16 IDE hard disk wedges
    identically, so it is not floppy- or IRQ-6-specific.
    Combined with the fact that PMODE/W's own INT 21h
    translation fails the same way, and that the same binary is
