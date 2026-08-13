@@ -1,0 +1,71 @@
+name: Tests
+
+# The heavy smoke tests need `build/micropython.bin`, which takes ~25-30
+# minutes to produce and is not checked in — those skip cleanly here.
+# What does run without it is still worth running on every push: the
+# FreeDOS package conformance suite (tests/test_fdpkg.py) and the qstr
+# table generator tests.
+#
+# Package conformance in particular has no other guard. It encodes rules
+# the FreeDOS repository enforces but does not validate for you — 8.3
+# paths, nothing at the zip root, Deflate rather than LZMA — and getting
+# one wrong produces a package that installs subtly wrong on a real DOS
+# machine rather than failing loudly here.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.10', '3.12', '3.13']
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # tests/test_fdpkg.py builds SOURCES.ZIP from `git ls-files`,
+          # so it needs a real repository, not an export.
+          fetch-depth: 1
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest
+          pip install -e .
+
+      - name: Show resolved uc386
+        run: pip show uc386 | grep -E '^(Name|Version)'
+
+      - name: Run tests
+        run: pytest tests/ -q --tb=short
+
+      - name: Build a FreeDOS package from a stub binary
+        # Exercises release/mkfdpkg.py end to end — the 8.3 validator,
+        # the LSM writer, the cp437 transliteration guard and the
+        # repository index generator — without needing a real MP.EXE.
+        run: |
+          head -c 65536 /dev/urandom > /tmp/MP.EXE
+          python3 release/mkfdpkg.py --exe /tmp/MP.EXE --outdir /tmp/fdpkg
+          ls -la /tmp/fdpkg /tmp/fdpkg/repo/devel
+          python3 - <<'PY'
+          import zipfile, gzip, pathlib
+          z = zipfile.ZipFile('/tmp/fdpkg/mpython.zip')
+          names = z.namelist()
+          assert 'APPINFO/MPYTHON.LSM' in names, names
+          assert any(n.endswith('MP.EXE') for n in names), names
+          idx = pathlib.Path('/tmp/fdpkg/repo/devel/index.lst').read_bytes()
+          assert idx.startswith(b'FD-REPOv1\t'), idx[:40]
+          assert gzip.decompress(
+              pathlib.Path('/tmp/fdpkg/repo/devel/index.gz').read_bytes()) == idx
+          print('package + repository OK')
+          PY
