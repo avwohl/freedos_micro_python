@@ -1,5 +1,32 @@
 # freedos_micro_python
 
+> ### 🤖 No Primate policy
+>
+> **The code in this repository is written by AI. No primate wrote it.**
+>
+> FreeDOS, which this port targets, has a
+> [No AI policy](https://www.freedos.org/about/devel/): *"We do not allow
+> AI for writing code… the code must be 100% written by a human."* This
+> project is the exact inverse of that policy.
+>
+> Code: AI. Documentation: AI. Deciding what to build, what is correct,
+> and what ships: primate.
+>
+> It is stated here, at the top, because the FreeDOS community cares
+> about provenance and should not have to discover it. The policy's own
+> **Scope** section covers the kernel, the standard DOS commands, and
+> anything a plain installation pulls in — an optional `devel`-group
+> application is outside it. That is the literal reading, but the
+> maintainers get to make that call with the facts in front of them, not
+> after the fact. See
+> [`docs/FREEDOS_PACKAGING.md`](docs/FREEDOS_PACKAGING.md).
+>
+> What is verifiable regardless of who typed it: MIT throughout, every
+> third-party component catalogued with its license in
+> [`docs/THIRD_PARTY.md`](docs/THIRD_PARTY.md), upstreams pinned to exact
+> commits, and the whole binary reproducible from source with two
+> commands.
+
 [MicroPython](https://github.com/micropython/micropython) port for
 **FreeDOS / i386**, built end-to-end through the
 [uc386](https://pypi.org/project/uc386/) C23 compiler. Produces a

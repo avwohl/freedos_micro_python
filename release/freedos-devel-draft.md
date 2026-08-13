@@ -6,15 +6,18 @@ Not sent. This is a draft for a human to review, complete and send to
 
 **Before sending, you must:**
 
-1. Fill in the provenance paragraph marked `[TODO]`. See
-   [`docs/FREEDOS_PACKAGING.md`](../docs/FREEDOS_PACKAGING.md) —
-   FreeDOS has a No-AI policy scoped to core packages. An optional
-   `devel` package falls outside that scope, but the community cares
-   about provenance and this should be stated accurately and in your
-   own words rather than left to be discovered.
+1. Read the provenance section and make sure it says what *you* want to
+   say. It discloses that the port is AI-written and invites the
+   maintainers to apply their own policy — matching the No Primate
+   notice at the top of the README. It is written in the first person
+   and you are the one sending it, so the wording should be yours.
 2. Host `mpython.zip` at a stable URL and paste it in.
 3. Confirm the test-install under QEMU + FreeDOS actually passed, and
    say which FreeDOS version you tested on.
+
+Expect the provenance point to be the whole conversation. Leading with
+it is deliberate: it is far better to be told no by people who had the
+facts than to be accepted by people who did not.
 
 ---
 
@@ -79,15 +82,43 @@ with its copyright line and its role in `docs/THIRD_PARTY.md` inside
 `SOURCES.ZIP`. The LSM `Copying-Policy` reads "Multiple open source
 licenses. See LICENSE file." per the spec's guidance for this case.
 
-**Provenance**
+**Provenance — please read before deciding**
 
-[TODO — describe honestly how the port was developed, including any
-use of AI tooling. The No-AI policy's Scope section covers core
-packages and anything installed by a plain DOS installation; an
-optional devel-group application is outside it. Say so plainly, say
-what is verifiable — MIT licensing throughout, pinned upstreams,
-reproducible build — and let the maintainers decide with full
-information.]
+This port was written by AI. So was the uc386 compiler it is built
+with, and so was this paragraph. No human wrote the code. I am telling
+you this up front rather than letting you find out, because I know the
+project has a No AI policy and I would rather you make this decision
+with the facts than discover them later.
+
+My reading of the policy is that it does not cover this package. Its
+Scope section names the kernel, command.com, the standard DOS commands,
+and "other packages that get installed with a plain DOS installation,
+such as the package manager and supporting tools." An optional
+`devel`-group interpreter is none of those. But that is my reading of
+your policy, and you are better placed to apply it than I am. If you
+would rather the repository stay free of AI-written code as a matter of
+principle regardless of scope, say so and I will not press it — I would
+rather you have a repository you are comfortable with than have this
+package in it.
+
+On the specific concerns the policy names:
+
+- *Licensing contamination.* Every component is catalogued with its
+  license and copyright in `docs/THIRD_PARTY.md`: MicroPython (MIT),
+  lwIP / axtls / libssh2 / DOS-32A (BSD 3-Clause), TweetNaCl and Brad
+  Conte's crypto-algorithms (public domain), integration glue (MIT).
+  Upstreams are pinned to exact commits, so you can diff what we ship
+  against what they published.
+- *Copyrightability.* If AI output is not eligible for copyright, the
+  practical effect here is that the integration glue is closer to public
+  domain than the MIT notice claims — which is more permissive than
+  stated, not less. The third-party components carry their own human
+  authors' copyrights and are unaffected.
+- *Correctness.* Judge it on behaviour rather than on the byline. It
+  rebuilds from source with two commands, and it is tested on real
+  FreeDOS under QEMU rather than only in an emulator — including a rig
+  that installs this very package with FDINST and then runs the
+  installed binary.
 
 **The package**
 
