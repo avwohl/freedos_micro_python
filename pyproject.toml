@@ -8,7 +8,13 @@ version = "0.2.0"
 description = "MicroPython port for FreeDOS / i386 — built end-to-end through the uc386 C23 compiler"
 readme = "README.md"
 license = "MIT"
-requires-python = ">=3.10"
+# 3.11, not 3.10, and the floor is inherited rather than chosen: our own
+# code is 3.10-clean, but uc386 declares requires-python >=3.11 (itself
+# forced by uplox, transitively via uc_core). Claiming 3.10 here made the
+# metadata self-contradictory — pip on 3.10 resolved us fine and then
+# died with "No matching distribution found for uc386>=0.2.1". CI caught
+# it. If uc386 ever lowers its floor, this can follow it back down.
+requires-python = ">=3.11"
 dependencies = [
     # 0.2.1 is the floor, not a preference. Two independent reasons:
     #
@@ -36,7 +42,6 @@ classifiers = [
     "Environment :: Console",
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",

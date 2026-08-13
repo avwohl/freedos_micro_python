@@ -19,7 +19,7 @@ of the box on FreeDOS / DOSBox-X / qemu+FreeDOS / dosiz.
 You need:
 
 - A Unix-y shell (macOS or Linux)
-- `git`, `python3` (≥ 3.10), `pip`, `nasm`
+- `git`, `python3` (≥ 3.11), `pip`, `nasm`
 
 ```bash
 pip install freedos_micro_python    # pulls in uc386 as a dep
