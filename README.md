@@ -4,22 +4,12 @@
 >
 > **The code in this repository is written by AI. No primate wrote it.**
 >
-> FreeDOS, which this port targets, has a
-> [No AI policy](https://www.freedos.org/about/devel/): *"We do not allow
-> AI for writing code… the code must be 100% written by a human."* This
-> project is the exact inverse of that policy.
->
 > Code: AI. Documentation: AI. Deciding what to build, what is correct,
 > and what ships: primate.
 >
-> It is stated here, at the top, because the FreeDOS community cares
-> about provenance and should not have to discover it. The policy's own
-> **Scope** section covers the kernel, the standard DOS commands, and
-> anything a plain installation pulls in — an optional `devel`-group
-> application is outside it. That is the literal reading, but the
-> maintainers get to make that call with the facts in front of them, not
-> after the fact. See
-> [`docs/FREEDOS_PACKAGING.md`](docs/FREEDOS_PACKAGING.md).
+> Stated up front so nobody has to work it out later, and so anyone
+> deciding whether to package or redistribute this can weigh it against
+> whatever rules they apply.
 >
 > What is verifiable regardless of who typed it: MIT throughout, every
 > third-party component catalogued with its license in

@@ -86,22 +86,14 @@ licenses. See LICENSE file." per the spec's guidance for this case.
 
 This port was written by AI. So was the uc386 compiler it is built
 with, and so was this paragraph. No human wrote the code. I am telling
-you this up front rather than letting you find out, because I know the
-project has a No AI policy and I would rather you make this decision
-with the facts than discover them later.
+you this up front rather than letting you find out later.
 
-My reading of the policy is that it does not cover this package. Its
-Scope section names the kernel, command.com, the standard DOS commands,
-and "other packages that get installed with a plain DOS installation,
-such as the package manager and supporting tools." An optional
-`devel`-group interpreter is none of those. But that is my reading of
-your policy, and you are better placed to apply it than I am. If you
-would rather the repository stay free of AI-written code as a matter of
-principle regardless of scope, say so and I will not press it — I would
-rather you have a repository you are comfortable with than have this
-package in it.
+You have a policy on this and I am not going to tell you how to read
+it — it is your project and your call. If the answer is no, say so and
+I will not press it; I would rather you have a repository you are
+comfortable with than have this package in it.
 
-On the specific concerns the policy names:
+What I can usefully offer is evidence rather than argument:
 
 - *Licensing contamination.* Every component is catalogued with its
   license and copyright in `docs/THIRD_PARTY.md`: MicroPython (MIT),

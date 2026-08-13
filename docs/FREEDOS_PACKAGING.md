@@ -223,40 +223,26 @@ twice over: immediately via route 1 or 2 above, and — once accepted
 into Latest/Unstable — via plain `FDNPKG install mpython` with no
 special configuration.
 
-## The No-AI policy — read the scope carefully
+## Provenance
 
-FreeDOS has a [No AI policy](https://www.freedos.org/about/devel/):
-*"We do not allow AI for writing code… the code must be 100% written by
-a human."*
+This port is AI-written, and both this repository and uc386 say so at
+the top of their README. The submission draft in
+`release/freedos-devel-draft.md` leads with the same disclosure rather
+than burying it.
 
-Its **Scope** section limits it explicitly:
+FreeDOS has its own policy on AI-written code, and its scope is theirs
+to determine — read it at <https://www.freedos.org/about/devel/> and let
+the maintainers apply it. Paraphrasing it here would only invite
+arguing with them about the meaning of their own rules, which is not our
+business and not a good look on a first submission.
 
-> Any package or program from the core parts of FreeDOS: the kernel,
-> command.com, append, chkdsk, debug, edit, fc, graphics, himem, label,
-> mem, and other standard "DOS" commands. This also includes other
-> packages that get installed with a plain DOS installation, such as
-> the package manager and supporting tools.
+What we can usefully bring to that conversation is evidence, so the
+submission answers the questions a maintainer would reasonably have:
 
-An optional `devel`-group application is not a core part of FreeDOS and
-is not installed by a plain DOS installation, so the policy as written
-does not cover it. That is the literal reading, and it is the right
-one.
-
-It would still be a mistake to submit this quietly, and we don't. Both
-this repository and uc386 carry a **No Primate policy** notice at the
-top of their README: the code is AI-written, no human wrote it. The
-submission draft in `release/freedos-devel-draft.md` leads with the same
-disclosure and explicitly invites the maintainers to apply their own
-policy rather than arguing them out of it.
-
-That ordering is deliberate. The policy exists because the community has
-strong feelings about provenance, and the concerns it names are worth
-answering directly:
-
-- **Licensing contamination** — every component is catalogued with its
-  license and copyright in [`THIRD_PARTY.md`](THIRD_PARTY.md), and every
-  upstream is pinned to an exact commit, so what we ship can be diffed
-  against what upstream published.
+- **Licensing** — every component is catalogued with its license and
+  copyright in [`THIRD_PARTY.md`](THIRD_PARTY.md), and every upstream is
+  pinned to an exact commit, so what we ship can be diffed against what
+  upstream published.
 - **Copyrightability** — if AI output is not eligible for copyright, the
   practical effect is that the integration glue is *more* permissive
   than its MIT notice claims, not less. The third-party components carry
@@ -266,10 +252,9 @@ answering directly:
   under QEMU, including `rigs/fdpkg-rig/`, which installs this very
   package with the real installer and runs the result.
 
-If the maintainers would rather keep the repository free of AI-written
-code as a matter of principle regardless of scope, that is a legitimate
-answer and the right one to accept. Being told no by people who had the
-facts beats being accepted by people who didn't.
+If the answer is no, that is a legitimate answer and the right one to
+accept. Being told no by people who had the facts beats being accepted
+by people who didn't.
 
 Note this cuts against the package in one concrete way: the LSM
 `Author` field credits MicroPython's authors and `Maintained-By`
