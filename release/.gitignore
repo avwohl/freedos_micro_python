@@ -2,3 +2,6 @@
 freedos-sources-*.tar.gz
 *.exe
 *.bin
+
+# FreeDOS package + repository. Reproducible via ./mkfdpkg.py.
+fdpkg/

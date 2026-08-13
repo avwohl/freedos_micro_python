@@ -323,3 +323,58 @@ cd ~/src/uc386
   /private/tmp/fdmp-build/build/micropython.asm \
   -o ~/src/freedos_micro_python/rigs/dosbox-x-rig/MP.EXE
 ```
+
+## FIXED: the dos_emu smoke suite (was 104 failures, now 0)
+
+`pytest tests/` used to be almost entirely red — 104 failed, 31 passed —
+with every failure identical:
+
+```
+dos_emu reported error: unexpected interrupt 0xd
+instructions_executed = 287538
+```
+
+It was never a port regression. The Aug 7 binary failed at the *same*
+instruction count under uc386 0.1.5 (installed clean from PyPI), 0.2.0,
+and under two unicorn releases. The bug was in uc386's emulator, and it
+is fixed in **uc386 0.2.1**.
+
+**What it was.** Executing `pop es` (0x07) or `pop ds` (0x1F) silently
+switches unicorn 2.x to a **16-bit stack**. Every SS-relative access
+afterwards — push, pop, call, ret, leave — truncates its address to 16
+bits. It is sticky and survives across `emu_start` calls. In this port
+it surfaced as a `pop ebp` yielding `0x01895959` where memory plainly
+held `0x010fff80`: the pop had read linear `0xff70`, i.e. `0x010fff70`
+truncated. Data accesses through DS are unaffected, which is why 287k
+instructions ran fine first and why every probe read looked correct.
+
+dos_emu already avoided this by *bypassing* the helpers that do the
+`push es / push ds / pop es` dance rather than executing them — but it
+located them with `binary.find()` and a comment asserting the prologue
+"appears at exactly one address". It appears twice. Our DPMI
+real-mode-call bridge (`port/dosint21_uc386dos.c`) was the second one,
+so it ran natively and poisoned the stack.
+
+**Three fixes landed in uc386 0.2.1:**
+
+1. `locate_seg_wrappers()` finds *every* match and classifies each by
+   body instead of taking the first.
+2. The DPMI bridge gets its own entry-point intercept.
+3. The rmcs dispatcher gained `AH=0x3C` (create) and `AH=0x47` (get
+   cwd). It implemented `3D,3E,3F,40,42` while this port sends
+   `3C,3D,3E,3F,40,42,47` — the missing `0x3C` is why every
+   `open(path, "w")` raised `ENOENT`. Plus a legacy-DTA fix: find-first
+   wrote the absolute vfs key into the DTA's 13-byte name field, so
+   `C:\CONFIG.INI` came back as `C:\config.in`.
+
+**Why nobody noticed.** uc386's only test that runs a binary containing
+`int 31h` is `tests/test_micropython_integration.py`, and it skips
+unless `FREEDOS_MP_BIN` is set — which no CI workflow does. Coverage
+confirmed the whole DPMI region was 0/104 statements. uc386 0.2.1 adds
+`tests/test_dpmi_bridge.py`, which exercises the same paths in-tree in
+0.05s with no MicroPython build.
+
+**Current state:** `pytest tests/` → **134 passed, 1 failed, 29
+skipped**. The one failure is `test_dosbox_x_rig_loads_ne2000`, which
+shells out to `dosbox-x` and times out needing a display; it never
+touches dos_emu.

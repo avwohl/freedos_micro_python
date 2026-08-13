@@ -28,9 +28,27 @@ Type "help()" for more information.
   and the long-int / float code paths
 - See [`NOTES.md`](NOTES.md) for the full per-slice development log
 
-## Install
+## Install on FreeDOS
 
-> **Note:** not yet ready on PyPI — install from the GitHub repository for now.
+If you just want to *run* MicroPython on a DOS machine, you don't need
+any of the build tooling below. The port ships as a standard FreeDOS
+package — copy `mpython.zip` to the machine and:
+
+```
+FDNPKG install MPYTHON.ZIP
+```
+
+That puts `MP.EXE` in `C:\DEVEL\MPYTHON`, registers the package, and
+puts `MP` on your `%PATH%`. Then `MP` starts the REPL and
+`MP SCRIPT.PY` runs a script.
+
+`FDINST install MPYTHON.ZIP` does the same on pre-386 machines and
+needs no network. See
+[`docs/FREEDOS_PACKAGING.md`](docs/FREEDOS_PACKAGING.md) for the
+package layout, how to serve it as an FDNPKG repository, and where it
+stands with the official FreeDOS repository.
+
+## Install the build tooling
 
 ```
 pip install freedos_micro_python
@@ -153,6 +171,10 @@ catalog.
 - `rigs/dosbox-x-rig/` — DOSBox-X regression rig (network packet driver)
 - `rigs/tls-rig/` — axtls TLS regression rig
 - `rigs/ssh-rig/` — paramiko-fixture SSH/SFTP/SCP rig
+- `rigs/fdpkg-rig/` — installs the FreeDOS package with the real
+  FreeDOS installer on a real FreeDOS kernel under QEMU
+- `release/mkfdpkg.py` — builds the FreeDOS package and a drop-in
+  FDNPKG repository from a built `MP.EXE`
 
 ## A debt to FreeDOS
 

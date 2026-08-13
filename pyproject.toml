@@ -4,18 +4,25 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "freedos_micro_python"
-version = "0.1.9"
+version = "0.2.0"
 description = "MicroPython port for FreeDOS / i386 — built end-to-end through the uc386 C23 compiler"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
 dependencies = [
-    # 0.1.5 is the floor, not a preference: it is the first release whose
-    # DOS libc issues real INT 21h AH=0x3D / AH=0x3C for open and create.
-    # Earlier versions call dos_emu's private AH=0xA0, which does not
-    # exist on real DOS, so an MP.EXE built against them misbehaves in
-    # os.stat / os.path.* / shutil on hardware.
-    "uc386>=0.1.5",
+    # 0.2.1 is the floor, not a preference. Two independent reasons:
+    #
+    #  - 0.1.5 was the first release whose DOS libc issues real INT 21h
+    #    AH=0x3D / AH=0x3C for open and create. Earlier versions call
+    #    dos_emu's private AH=0xA0, which does not exist on real DOS, so
+    #    an MP.EXE built against them misbehaves in os.stat /
+    #    os.path.* / shutil on hardware.
+    #  - 0.2.1 is the first release whose dos_emu can run this port at
+    #    all. Before it, the emulator executed our DPMI real-mode-call
+    #    bridge natively, which poisons unicorn's stack width, and every
+    #    run died at the same instruction — 104 of our smoke tests
+    #    failed identically. See docs/WIP.md.
+    "uc386>=0.2.1",
 ]
 authors = [
     {name = "freedos_micro_python contributors"}

@@ -8,6 +8,10 @@ are:
   - `fetch-freedos.sh` — reproducible fetch script that pulls the
     FreeDOS components we reference and bundles them into
     `release/freedos-sources-<date>.tar.gz`.
+  - `mkfdpkg.py` — builds the FreeDOS package (`mpython.zip`) and a
+    drop-in FDNPKG repository from a built `MP.EXE`. See
+    [`docs/FREEDOS_PACKAGING.md`](../docs/FREEDOS_PACKAGING.md) for
+    the format details and the path into the official repository.
 
 The actual tarballs are **not** checked into git (gitignored via
 `release/.gitignore`). Cut a release by running the fetch script;
@@ -75,3 +79,22 @@ cd release/
 Wall-clock: a couple of minutes plus download time. Total size
 is roughly 15–25 MB depending on which kernel/freecom tags are
 current.
+
+## Building the FreeDOS package
+
+After a `port` build and an `exe.py` bind (see
+[`docs/WIP.md`](../docs/WIP.md)):
+
+```sh
+python3 release/mkfdpkg.py --exe /path/to/MP.EXE
+```
+
+That writes `release/fdpkg/mpython.zip` — the installable FreeDOS
+package — plus `release/fdpkg/repo/`, a directory you can serve over
+plain HTTP and point FDNPKG at with a single `REPO` line. Both are
+gitignored; regenerate them at release time.
+
+The script validates the things the repository actually enforces:
+every path fits 8.3, nothing sits at the zip root, and the archive is
+Deflate-compressed (not LZMA, which needs more memory to unpack than
+most DOS machines have).
