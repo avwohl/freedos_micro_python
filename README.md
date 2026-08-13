@@ -1,21 +1,6 @@
 # freedos_micro_python
 
-> ### 🤖 No Primate policy
->
-> **The code in this repository is written by AI. No primate wrote it.**
->
-> Code: AI. Documentation: AI. Deciding what to build, what is correct,
-> and what ships: primate.
->
-> Stated up front so nobody has to work it out later, and so anyone
-> deciding whether to package or redistribute this can weigh it against
-> whatever rules they apply.
->
-> What is verifiable regardless of who typed it: MIT throughout, every
-> third-party component catalogued with its license in
-> [`docs/THIRD_PARTY.md`](docs/THIRD_PARTY.md), upstreams pinned to exact
-> commits, and the whole binary reproducible from source with two
-> commands.
+> **AI — no code written by a primate.**
 
 [MicroPython](https://github.com/micropython/micropython) port for
 **FreeDOS / i386**, built end-to-end through the

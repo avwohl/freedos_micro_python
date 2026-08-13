@@ -7,10 +7,10 @@ Not sent. This is a draft for a human to review, complete and send to
 **Before sending, you must:**
 
 1. Read the provenance section and make sure it says what *you* want to
-   say. It discloses that the port is AI-written and invites the
-   maintainers to apply their own policy — matching the No Primate
-   notice at the top of the README. It is written in the first person
-   and you are the one sending it, so the wording should be yours.
+   say. It discloses that the port is AI-written and leaves the
+   maintainers to apply their own policy, matching the notice at the top
+   of the README. It is written in the first person and you are the one
+   sending it, so the wording should be yours.
 2. Host `mpython.zip` at a stable URL and paste it in.
 3. Confirm the test-install under QEMU + FreeDOS actually passed, and
    say which FreeDOS version you tested on.
