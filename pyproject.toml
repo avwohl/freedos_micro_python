@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "freedos_micro_python"
-version = "0.2.3"
+version = "0.2.4"
 description = "MicroPython port for FreeDOS / i386 — built end-to-end through the uc386 C23 compiler"
 readme = "README.md"
 license = "MIT"
@@ -28,7 +28,7 @@ dependencies = [
     #    bridge natively, which poisons unicorn's stack width, and every
     #    run died at the same instruction — 104 of our smoke tests
     #    failed identically. See docs/WIP.md.
-    "uc386>=0.2.1",
+    "uc386>=0.2.5",
 ]
 authors = [
     {name = "freedos_micro_python contributors"}
