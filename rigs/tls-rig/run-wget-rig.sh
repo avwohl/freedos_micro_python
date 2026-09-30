@@ -16,7 +16,8 @@
 #     and contains the rig-server's marker.
 #
 # Prereqs: qemu-system-i386, mtools, openssl, python3, plus
-# MP.EXE built via addons/harness/exe.py (see ../README.md).
+# MP.EXE built via addons/harness/exe.py (see "Full run (with MP.EXE)"
+# in ../dosbox-x-rig/README.md).
 # WGET.PY is staged from ../../examples/wget.py at floppy build
 # time so a single source-of-truth file ships both as the
 # example and as the floppy module the rig imports.

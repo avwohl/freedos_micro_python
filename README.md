@@ -28,7 +28,7 @@ Type "help()" for more information.
 - ~70 smoke tests pin REPL banner, builtins, comprehensions, exceptions,
   module imports (`os`, `time`, `re`, `json`, `hashlib`, `ssl`, ...),
   and the long-int / float code paths
-- See [`NOTES.md`](NOTES.md) for the full per-slice development log
+- See [`NOTES.md`](https://github.com/avwohl/freedos_micro_python/blob/main/NOTES.md) for the full per-slice development log
 
 ## Install on FreeDOS
 
@@ -46,7 +46,7 @@ puts `MP` on your `%PATH%`. Then `MP` starts the REPL and
 
 `FDINST install MPYTHON.ZIP` does the same on pre-386 machines and
 needs no network. See
-[`docs/FREEDOS_PACKAGING.md`](docs/FREEDOS_PACKAGING.md) for the
+[`docs/FREEDOS_PACKAGING.md`](https://github.com/avwohl/freedos_micro_python/blob/main/docs/FREEDOS_PACKAGING.md) for the
 package layout, how to serve it as an FDNPKG repository, and where it
 stands with the official FreeDOS repository.
 
@@ -72,45 +72,45 @@ freedos-micropython port         # multi-TU build → ./build/micropython.bin
 ```
 
 The output is `./build/micropython.bin`, a flat i386 DOS binary.
-[`docs/BUILDING.md`](docs/BUILDING.md) covers running the binary under uc386's
+[`docs/BUILDING.md`](https://github.com/avwohl/freedos_micro_python/blob/main/docs/BUILDING.md) covers running the binary under uc386's
 emulator, producing a real DOS `.exe` with uc386's `addons/harness/exe.py`,
 running the tests, and the source layout.
 
 ## Bundled networking utilities
 
 The port ships three pure-MicroPython programs, `wget.py`, `scp.py` and
-`sftp.py`, in [`examples/`](examples/). The three programs double as regression
+`sftp.py`, in [`examples/`](https://github.com/avwohl/freedos_micro_python/blob/main/examples/). The three programs double as regression
 tests and as usable standalone tools. See
-[`docs/bundled-utilities.md`](docs/bundled-utilities.md).
+[`docs/bundled-utilities.md`](https://github.com/avwohl/freedos_micro_python/blob/main/docs/bundled-utilities.md).
 
 ## Documentation
 
-- [User manual](https://avwohl.github.io/freedos_micro_python/) - the full manual, also in [`docs/`](docs/index.md)
-- [`docs/feature-matrix.md`](docs/feature-matrix.md) - MicroPython features enabled, not implemented, and in progress
-- [`docs/bundled-utilities.md`](docs/bundled-utilities.md) - running programs, and the wget / scp / sftp tools
-- [`docs/BUILDING.md`](docs/BUILDING.md) - build tooling, quick start, testing, source layout
-- [`docs/FREEDOS_PACKAGING.md`](docs/FREEDOS_PACKAGING.md) - the FreeDOS package and FDNPKG repository
-- [`docs/TESTS.md`](docs/TESTS.md) - catalog of tests and rigs
-- [`docs/WIP.md`](docs/WIP.md) - work in progress and known issues
-- [`docs/THIRD_PARTY.md`](docs/THIRD_PARTY.md) - third-party projects and licenses
-- [`NOTES.md`](NOTES.md) - per-slice development log
+- [User manual](https://avwohl.github.io/freedos_micro_python/) - the full manual, also in [`docs/`](https://github.com/avwohl/freedos_micro_python/blob/main/docs/index.md)
+- [`docs/feature-matrix.md`](https://github.com/avwohl/freedos_micro_python/blob/main/docs/feature-matrix.md) - MicroPython features enabled, not implemented, and in progress
+- [`docs/bundled-utilities.md`](https://github.com/avwohl/freedos_micro_python/blob/main/docs/bundled-utilities.md) - running programs, and the wget / scp / sftp tools
+- [`docs/BUILDING.md`](https://github.com/avwohl/freedos_micro_python/blob/main/docs/BUILDING.md) - build tooling, quick start, testing, source layout
+- [`docs/FREEDOS_PACKAGING.md`](https://github.com/avwohl/freedos_micro_python/blob/main/docs/FREEDOS_PACKAGING.md) - the FreeDOS package and FDNPKG repository
+- [`docs/TESTS.md`](https://github.com/avwohl/freedos_micro_python/blob/main/docs/TESTS.md) - catalog of tests and rigs
+- [`docs/WIP.md`](https://github.com/avwohl/freedos_micro_python/blob/main/docs/WIP.md) - work in progress and known issues
+- [`docs/THIRD_PARTY.md`](https://github.com/avwohl/freedos_micro_python/blob/main/docs/THIRD_PARTY.md) - third-party projects and licenses
+- [`NOTES.md`](https://github.com/avwohl/freedos_micro_python/blob/main/NOTES.md) - per-slice development log
 
 ## A debt to FreeDOS
 
 This project targets [FreeDOS](https://www.freedos.org/) and would have been
 impossible without the FreeDOS source tree to read. The `release/` directory
 ships a copy of the FreeDOS sources the project leaned on. The full statement is
-in [`docs/credits.md`](docs/credits.md#a-debt-to-freedos).
+in [`docs/credits.md`](https://github.com/avwohl/freedos_micro_python/blob/main/docs/credits.md#a-debt-to-freedos).
 
 ## License
 
-[MIT](LICENSE), matching upstream MicroPython. The integration glue
+[MIT](https://github.com/avwohl/freedos_micro_python/blob/main/LICENSE), matching upstream MicroPython. The integration glue
 (scripts, port files, CLI, tests) is what's covered here. Third-party
 sources fetched by `build_port.sh` (MicroPython, axtls, lwIP,
 libssh2, TweetNaCl, crypto-algorithms) retain their own licenses;
 the FreeDOS sources in `release/` retain GPLv2 / their own
 per-project licenses. The full catalog with attributions is in
-[`docs/THIRD_PARTY.md`](docs/THIRD_PARTY.md).
+[`docs/THIRD_PARTY.md`](https://github.com/avwohl/freedos_micro_python/blob/main/docs/THIRD_PARTY.md).
 
 ## Related projects
 

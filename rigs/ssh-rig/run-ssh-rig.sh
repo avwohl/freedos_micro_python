@@ -17,7 +17,8 @@
 #   - mtools
 #   - python3 with paramiko (4.x)
 #   - ssh-keygen
-#   - MP.EXE built via addons/harness/exe.py (see ../README.md)
+#   - MP.EXE built via addons/harness/exe.py (see "Full run
+#     (with MP.EXE)" in ../dosbox-x-rig/README.md)
 #
 # Usage:
 #   ./run-ssh-rig.sh                    # uses ../dosbox-x-rig/MP.EXE

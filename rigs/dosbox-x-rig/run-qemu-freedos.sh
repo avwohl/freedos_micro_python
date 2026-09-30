@@ -13,7 +13,8 @@
 # Prereqs:
 #   - qemu-system-i386 (brew install qemu / apt install qemu-system-x86)
 #   - mtools           (brew install mtools / apt install mtools)
-#   - MP.EXE built via addons/harness/exe.py (see ../README.md)
+#   - MP.EXE built via addons/harness/exe.py (see "Full run
+#     (with MP.EXE)" in README.md)
 #   - ECHOTEST.EXE built from addons/gnu/echo (optional, baseline)
 #
 # Usage:

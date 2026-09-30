@@ -19,7 +19,8 @@
 #   - mtools (brew install mtools / apt install mtools)
 #   - openssl (system)
 #   - python3 (with stdlib ssl)
-#   - MP.EXE built via addons/harness/exe.py (see ../README.md)
+#   - MP.EXE built via addons/harness/exe.py (see "Full run
+#     (with MP.EXE)" in ../dosbox-x-rig/README.md)
 #
 # Usage:
 #   ./run-tls-rig.sh                    # uses ../dosbox-x-rig/MP.EXE
