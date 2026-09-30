@@ -66,9 +66,30 @@ Targeting FreeDOS would have been impossible without the FreeDOS
 source tree to read when debugging PMODE/W's INT 21h reflection,
 the DOS packet-driver interface, the FAT write path, and a
 handful of NLS / RTC quirks. The `release/` directory in the
-repository ships a copy of the FreeDOS sources we leaned on; see
-the project [README](https://github.com/avwohl/freedos_micro_python#a-debt-to-freedos)
-for the full statement.
+repository ships a copy of the FreeDOS sources we leaned on. The
+full statement, moved here from the project README, follows.
+
+This project targets [FreeDOS](https://www.freedos.org/). FreeDOS is
+the reason a 32-bit i386 Python REPL on a 1990s-era PC makes any
+sense in 2026 at all — without a maintained, open-source DOS kernel
++ shell + utilities, there'd be no plausible host for this binary
+to run on.
+
+We mostly use FreeDOS *as a target*: the rigs boot a stock FreeDOS
+1.4 MB floppy image into QEMU (or DOSBox-X), run `MP.EXE` against
+its kernel + COMMAND.COM + PMODE/W, and tear down. We do not
+modify the FreeDOS kernel or utilities. But debugging PMODE/W's
+INT 21h reflection, the DOS packet-driver interface, the FAT
+write path, and a handful of NLS / RTC quirks would have been
+impossible without the FreeDOS source tree to read.
+
+In the spirit of paying that debt forward, the `release/` directory
+ships a copy of the FreeDOS sources we leaned on, regardless of
+whether our limited use strictly requires source redistribution
+under their license. See [`release/README.md`](https://github.com/avwohl/freedos_micro_python/blob/main/release/README.md)
+for the catalog. License + copyright notices for FreeDOS and every
+other third-party project bundled or fetched by the build are in
+[`docs/THIRD_PARTY.md`](https://github.com/avwohl/freedos_micro_python/blob/main/docs/THIRD_PARTY.md).
 
 [FreeDOS](https://www.freedos.org/) is GPLv2-licensed and the
 work of many contributors over many years. We use it as a target,

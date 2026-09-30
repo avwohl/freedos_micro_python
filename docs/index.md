@@ -95,6 +95,7 @@ utilities.
 - [`wget.py`](tools/wget.md) — HTTPS streaming downloader
 - [`scp.py`](tools/scp.md) — SCP client
 - [`sftp.py`](tools/sftp.md) — interactive `sftp(1)`-style shell
+- [All three tools, with examples](bundled-utilities.md)
 
 ### Practical
 
@@ -108,9 +109,7 @@ utilities.
 
 ## What works, what doesn't
 
-The feature matrix at the bottom of the
-[repo README](https://github.com/avwohl/freedos_micro_python#micropython-feature-matrix)
-is the authoritative answer.
+The [feature matrix](feature-matrix.md) is the authoritative answer.
 
 The short version: **the language is real Python 3.** Comprehensions,
 generators, classes, exceptions, decorators, `yield from`, f-strings,

@@ -71,136 +71,36 @@ freedos-micropython build        # per-TU triage build (generates qstrdefs)
 freedos-micropython port         # multi-TU build → ./build/micropython.bin
 ```
 
-Wall-clock for the `port` step is ~14 minutes on a recent Mac. The
-output is `./build/micropython.bin`, a flat i386 DOS binary runnable
-under uc386's emulator:
-
-```python
-from uc386.dos_emu import run
-res = run("build/micropython.bin", timeout_seconds=10.0,
-          instruction_limit=2_000_000_000)
-print(res.stdout)   # → "MicroPython uc386-triage on ...\n..."
-```
-
-To produce a real DOS `.exe` (PMODE/W bound, ~12 KB stub overhead):
-use uc386's `addons/harness/exe.py`.
-
-## Testing
-
-After a successful `port` build:
-
-```bash
-pytest --pyargs freedos_micro_python    # parametric: tests live in tests/
-# or, against a checkout:
-pytest tests/
-```
-
-The smoke tests skip cleanly if `build/micropython.bin` doesn't exist.
+The output is `./build/micropython.bin`, a flat i386 DOS binary.
+[`docs/BUILDING.md`](docs/BUILDING.md) covers running the binary under uc386's
+emulator, producing a real DOS `.exe` with uc386's `addons/harness/exe.py`,
+running the tests, and the source layout.
 
 ## Bundled networking utilities
 
-The port ships three pure-MicroPython programs that double as
-regression tests and as usable standalone tools — drop them into a
-DOS image (or run them in the REPL) and they work end-to-end against
-real servers.
+The port ships three pure-MicroPython programs, `wget.py`, `scp.py` and
+`sftp.py`, in [`examples/`](examples/). The three programs double as regression
+tests and as usable standalone tools. See
+[`docs/bundled-utilities.md`](docs/bundled-utilities.md).
 
-### Running a program
+## Documentation
 
-```
-MP.EXE SCRIPT.PY [args ...]
-```
-
-runs `SCRIPT.PY` and exits; the remaining words land in `sys.argv`.
-Exit status is 0, or 1 on an uncaught exception. With no argument
-`MP.EXE` starts the interactive REPL.
-
-You can also paste a program straight into the REPL: press `Ctrl-E`,
-paste, then `Ctrl-D`. This needs no file at all, which makes it the
-reliable option in the environment noted below.
-
-> **Reading files from disk works.** Verified with one binary on
-> QEMU + FreeDOS, DOSBox-X and dosiz: `MP.EXE SCRIPT.PY` with
-> `sys.argv`, `open()` / `read()` / `write()` / append, `import` of a
-> `.py`, and the `os` / `shutil` calls.
->
-> The build bundles the DOS/32A extender. PMODE/W is still selectable
-> with `--extender=pmodew`, but its real-mode call path hangs on any
-> DOS call that touches a physical sector — see
-> [`docs/WIP.md`](docs/WIP.md) item 2.
-
-- **[`examples/wget.py`](examples/wget.py)** — HTTPS streaming
-  downloader. Built on `socket` (lwIP-backed) and `ssl` (axtls
-  CERT_REQUIRED supported via `--ca-certs`). Streams in 4 KB chunks
-  so the whole body never sits in RAM. Follows up to 5 redirects.
-  ```
-  MP.EXE WGET.PY -O OUT.TXT https://example.com/file
-  ```
-
-- **[`examples/scp.py`](examples/scp.py)** — SCP client wrapping
-  `_ssh.Session.scp_recv()` and `_ssh.Session.scp_send()` (which
-  bind libssh2's `scp_recv2` / `scp_send_ex`). Password auth only
-  for now; up/down inferred from which arg has the `host:/path` colon.
-  ```
-  MP.EXE SCP.PY user@10.0.2.2:/etc/motd MOTD.TXT
-  MP.EXE SCP.PY DATA.BIN user@10.0.2.2:/uploads/data.bin
-  ```
-
-- **[`examples/sftp.py`](examples/sftp.py)** — SFTP client wrapping
-  `_ssh.Session.sftp()` + `SFTP.open()` / `SFTPFile.read|write|close`.
-  ```
-  MP.EXE SFTP.PY get user@10.0.2.2:/etc/hostname HOST.TXT
-  MP.EXE SFTP.PY put REPORT.TXT user@10.0.2.2:/incoming/report.txt
-  ```
-
-All three run inside the SSH rig harness (`rigs/ssh-rig/`,
-`rigs/tls-rig/`) against a paramiko/local-server fixture and confirm
-PASS end-to-end; see [`docs/TESTS.md`](docs/TESTS.md) for the full
-catalog.
-
-## Layout
-
-- `src/freedos_micro_python/scripts/` — the three shell scripts
-  (`fetch.sh`, `build.sh`, `build_port.sh`); invoked via the CLI
-  wrapper, which sets `UC386_LIB_INCLUDE` from the installed `uc386`
-- `src/freedos_micro_python/port/` — the FreeDOS port files
-  (`mpconfigport.h`, `*_uc386dos.c`, lwIP + axtls glue)
-- `src/freedos_micro_python/gen_qstrdefs.py` — qstr table generator
-  (mirrors upstream's `tools/makeqstrdata.py`)
-- `src/freedos_micro_python/cli.py` — the `freedos-micropython` CLI
-- `examples/` — standalone MicroPython programs (`wget.py`, `scp.py`,
-  `sftp.py`) shipped as both regression tests and usable utilities
-- `tests/` — pytest smoke tests + qstr unit tests
-- `rigs/dosbox-x-rig/` — DOSBox-X regression rig (network packet driver)
-- `rigs/tls-rig/` — axtls TLS regression rig
-- `rigs/ssh-rig/` — paramiko-fixture SSH/SFTP/SCP rig
-- `rigs/fdpkg-rig/` — installs the FreeDOS package with the real
-  FreeDOS installer on a real FreeDOS kernel under QEMU
-- `release/mkfdpkg.py` — builds the FreeDOS package and a drop-in
-  FDNPKG repository from a built `MP.EXE`
+- [User manual](https://avwohl.github.io/freedos_micro_python/) - the full manual, also in [`docs/`](docs/index.md)
+- [`docs/feature-matrix.md`](docs/feature-matrix.md) - MicroPython features enabled, not implemented, and in progress
+- [`docs/bundled-utilities.md`](docs/bundled-utilities.md) - running programs, and the wget / scp / sftp tools
+- [`docs/BUILDING.md`](docs/BUILDING.md) - build tooling, quick start, testing, source layout
+- [`docs/FREEDOS_PACKAGING.md`](docs/FREEDOS_PACKAGING.md) - the FreeDOS package and FDNPKG repository
+- [`docs/TESTS.md`](docs/TESTS.md) - catalog of tests and rigs
+- [`docs/WIP.md`](docs/WIP.md) - work in progress and known issues
+- [`docs/THIRD_PARTY.md`](docs/THIRD_PARTY.md) - third-party projects and licenses
+- [`NOTES.md`](NOTES.md) - per-slice development log
 
 ## A debt to FreeDOS
 
-This project targets [FreeDOS](https://www.freedos.org/). FreeDOS is
-the reason a 32-bit i386 Python REPL on a 1990s-era PC makes any
-sense in 2026 at all — without a maintained, open-source DOS kernel
-+ shell + utilities, there'd be no plausible host for this binary
-to run on.
-
-We mostly use FreeDOS *as a target*: the rigs boot a stock FreeDOS
-1.4 MB floppy image into QEMU (or DOSBox-X), run `MP.EXE` against
-its kernel + COMMAND.COM + PMODE/W, and tear down. We do not
-modify the FreeDOS kernel or utilities. But debugging PMODE/W's
-INT 21h reflection, the DOS packet-driver interface, the FAT
-write path, and a handful of NLS / RTC quirks would have been
-impossible without the FreeDOS source tree to read.
-
-In the spirit of paying that debt forward, the `release/` directory
-ships a copy of the FreeDOS sources we leaned on, regardless of
-whether our limited use strictly requires source redistribution
-under their license. See [`release/README.md`](release/README.md)
-for the catalog. License + copyright notices for FreeDOS and every
-other third-party project bundled or fetched by the build are in
-[`docs/THIRD_PARTY.md`](docs/THIRD_PARTY.md).
+This project targets [FreeDOS](https://www.freedos.org/) and would have been
+impossible without the FreeDOS source tree to read. The `release/` directory
+ships a copy of the FreeDOS sources the project leaned on. The full statement is
+in [`docs/credits.md`](docs/credits.md#a-debt-to-freedos).
 
 ## License
 
@@ -218,129 +118,3 @@ per-project licenses. The full catalog with attributions is in
 - [uc386](https://github.com/avwohl/uc386) — C23 compiler for the i386 processor and MS-DOS. It builds this port and hosts the `dos_emu` test harness.
 - [uc_core](https://github.com/avwohl/uc_core) — Shared C23 frontend and AST optimizer that the uc386 compiler and its Z80 sibling uc80 both use.
 - [MicroPython](https://github.com/micropython/micropython) — The upstream project. This repository is its port for FreeDOS on i386.
-
-## MicroPython feature matrix
-
-Settings come from
-[`src/freedos_micro_python/port/mpconfigport.h`](src/freedos_micro_python/port/mpconfigport.h).
-The port runs at `MICROPY_CONFIG_ROM_LEVEL = EXTRA_FEATURES`, the
-richest preset upstream ships.
-
-### Enabled
-
-The EXTRA_FEATURES preset itself turns on the language-surface knobs
-listed first; everything below it is an explicit override on top.
-
-    Language surface (from EXTRA_FEATURES)
-      compile() / eval() / exec()           input()
-      memoryview                            frozenset
-      f-strings                             collections.deque + iter/subscr
-      __add__ / __radd__ / __iadd__ etc.    function attribute access
-      delattr() / setattr()                 math.pi / e / tau / inf / nan
-      math.factorial / math.isclose         bytes.hex / fromhex
-      str.center / partition / splitlines   bytearray slice-assign
-      Emacs REPL keys + auto-indent         Ctrl-C → KeyboardInterrupt
-
-    Runtime
-      ENABLE_COMPILER         ENABLE_GC               HELPER_REPL
-      ENABLE_EXTERNAL_IMPORT  STACK_CHECK             NLR_SETJMP
-      MODULE___FILE__         PY_BUILTINS_HELP        PY_BUILTINS_RANGE_BINOP
-      USE_INTERNAL_ERRNO      STREAMS_POSIX_API
-
-    Numerics
-      FLOAT_IMPL  = DOUBLE          (full x87 double-precision)
-      FLOAT_FORMAT_IMPL = EXACT     (round-trip shortest decimal)
-      LONGINT_IMPL = LONGLONG       (heap-allocated big ints)
-      PY_MATH_SPECIAL_FUNCTIONS     (erf, gamma, ...)
-      PY_MATH_{ATAN2,FMOD,MODF,POW,GAMMA}_FIX  (CPython-matching edges)
-
-    Standard library (extmod)
-      io          open(), IOBase, BytesIO, StringIO
-      sys         modules / exit / path / argv / exc_info / tracebacklimit
-      time        time / time_ns / sleep_ms / ticks_ms / localtime / gmtime / mktime
-      random      EXTRA_FUNCS, seeded from BIOS tick counter
-      hashlib     SHA-256 + SHA-1 + MD5 (real axtls implementations)
-      binascii    full surface incl. CRC32
-      deflate     uzlib decoder + DEFLATE_COMPRESS encoder
-      re          + sub, match groups, span/start/end
-      heapq, json, struct, uctypes, select, _asyncio
-      machine     mem8/mem16/mem32 (direct linear-address poke in PMODE/W)
-
-    Networking + crypto (the harder lift)
-      socket      BSD-style via lwIP (TCP/UDP/DNS, IPv4)
-      ssl         axtls (handshake + CERT_REQUIRED with --ca-certs)
-      _ssh        libssh2 1.11.1 over axtls + TweetNaCl
-                  Session.userauth_password / exec / sftp() /
-                  scp_recv / scp_send / close
-      uc386_net   NE2000 packet driver, eth_init / eth_status / eth_set_static
-      lwip        lwIP raw module (RX poll, callbacks)
-      pktdrv      DOS packet-driver INT 60h harness
-      dosint21    raw INT 21h access for DOS-native syscalls
-
-### Not implemented
-
-    _thread / PY_THREAD               DOS is single-threaded; emulating
-                                      pre-emptive threads would mislead.
-                                      Cooperative asyncio runs fine.
-
-    cmath / PY_CMATH                  Complex numbers — not on the path
-                                      for any user we serve today.
-
-    weakref / PY_WEAKREF              Off at CORE; default at EXTRA.
-                                      Skipped: no concrete use yet.
-
-    VFS / PY_VFS                      MICROPY_VFS abstraction (mount,
-                                      multiple FS backends) — we have a
-                                      flat-file import path through INT
-                                      21h instead. Adding VFS would buy
-                                      FAT/Lit/Posix mounts and overlay
-                                      semantics; not a current need.
-
-    network module                    extmod/modnetwork.c (the Network
-                                      ABC + cyw43/wiznet/... drivers).
-                                      DOS NICs are managed via the
-                                      packet-driver interface instead;
-                                      uc386_net + lwip cover the same
-                                      ground at a lower level.
-
-    machine.Pin / I2C / SPI / UART    No DOS-level device model. ISA bus
-    /Timer/ADC/DAC/PWM/WDT            access works via machine.mem32, but
-                                      the typed peripherals would each
-                                      need a driver. Not on the path.
-
-    bluetooth / espnow / btree        Hardware/RTOS-specific upstream
-                                      modules. No DOS analogue exists.
-
-    PERSISTENT_CODE_LOAD / .mpy       We don't run mpy-tool, so the
-    FROZEN_MPY                        frozen-module symbols would be
-                                      undefined externs at link time.
-                                      Pure-source .py imports work.
-
-### In progress
-
-    SSH publickey auth                Today only userauth_password is
-                                      wired up. session.userauth_publickey
-                                      needs real RSA / DH / Ed25519
-                                      key-parse in port/libssh2_axtls.c
-                                      (currently stubs returning -1).
-                                      Tracked in docs/WIP.md.
-
-    Frozen-bytecode loading           Wiring mpy-tool.py + the
-                                      mp_frozen_* symbols into the
-                                      build would let us ship the
-                                      asyncio Python files baked into
-                                      the .exe. Mechanical, not
-                                      research.
-
-    Wider lwIP surface                IPv6 is off; UDP multicast and
-                                      raw sockets are exposed at the
-                                      lwIP layer but not surfaced
-                                      through PY_SOCKET. Add as
-                                      demand appears.
-
-    TCP_NODELAY                       modlwip's setsockopt(TCP_NODELAY)
-                                      matches lwIP's TF_NODELAY=0x40
-                                      constant, not POSIX TCP_NODELAY=1.
-                                      Trivial to fix — open while we
-                                      decide whether to break the
-                                      lwIP-native users.
